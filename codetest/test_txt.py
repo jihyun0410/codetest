@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config
-from .db import FeatureDB
+from .db import get_store
 from .models import (ChangeUnit, MethodInfo, ReasoningTrace, Report, ReportItem,
                      TestArtifact)
 from .runner import run_tests
@@ -59,14 +59,19 @@ def build_report_from_txt(cfg: Config, command: str) -> Report:
         intent="modification",
         intent_reason="사용자 제공 테스트(test.txt)",
         importance="Mid",
+        importance_reason="사용자가 직접 지정한 테스트이므로 기본 중요도(Mid)로 표기함.",
     )
     artifact = TestArtifact(
         class_name=class_name, package=package, file_path=str(file_path),
         source=source, reasoning=reasoning, covered_units=[unit],
+        llm_calls=0,   # 사용자가 제공한 코드 — LLM 호출 없음
     )
     result = run_tests(cfg, artifact)
     report.items.append(ReportItem(unit=unit, artifact=artifact, result=result))
-    FeatureDB(cfg.db_path).record_run(command, f"ran provided test {class_name}")
+    # Session store: memory unless --persist was requested.
+    get_store(cfg.persist, cfg.db_path).record_run(
+        command, f"ran provided test {class_name}"
+    )
     return report
 
 

@@ -95,8 +95,20 @@ def show_test_code(item: ReportItem) -> None:
     r = art.reasoning
     meta = Text()
     meta.append("대상 파일 : ", style="bold"); meta.append(f"{item.unit.file_path}\n")
+    meta.append("LLM 호출 : ", style="bold")
+    meta.append(f"{art.llm_calls}회 (의도·중요도 분석 + 테스트 코드 동시 수신)\n")
     meta.append("변경 의도 : ", style="bold")
     meta.append(f"{_INTENT_KO.get(item.unit.intent, item.unit.intent)} — {item.unit.intent_reason}\n")
+    meta.append("중요도 근거: ", style="bold")
+    meta.append(f"{item.unit.importance_reason or '(근거 없음)'}\n")
+
+    ctx = item.unit.context
+    if ctx is not None:
+        meta.append("\nAST MCP 컨텍스트(필터링된 전달 항목):\n", style="bold")
+        meta.append(f"  • 시그니처  : {ctx.method_signature}\n")
+        meta.append(f"  • 의존 Bean : {', '.join(ctx.dependency_beans) or '없음'}\n")
+        meta.append(f"  • 호출 순서 : {ctx.call_flow or '없음'}\n")
+
     meta.append("\n사고 과정(chain-of-thought):\n", style="bold")
     for i, step in enumerate(r.steps, 1):
         meta.append(f"  {i}. {step}\n")
