@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codetest-agent"
+version = "0.1.0"
+description = "CLI-based AI agent that generates and runs Spring Boot tests for changed code (Git Diff + AST + LLM reasoning)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "javalang>=0.13.0",
+]
+
+[project.scripts]
+codetest = "codetest.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["codetest*"]
