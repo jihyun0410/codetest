@@ -1,111 +1,86 @@
-"""Clients for the AST MCP server.
+"""Agent-side MCP clients.
 
 Two transports, one contract:
 
-* :class:`InProcessAstClient` (default) calls the same tool handlers directly —
-  no subprocess, no serialization cost, ideal for a single CLI session.
-* :class:`StdioAstClient` speaks JSON-RPC to ``python -m codetest.mcp.server``,
-  which is how an external MCP host would reach it.
+* ``inprocess`` (default) dispatches straight into the server's registry — no
+  subprocess, no serialization cost, ideal for a single CLI session.
+* ``stdio`` speaks JSON-RPC to ``python -m codetest.mcp.<server>.server``,
+  which is how an external MCP host reaches the same tools.
 
-Both return :class:`~codetest.models.MethodContext` objects: only the filtered
-signature / dependency beans / call-order summary reaches the pipeline.
+Because both go through the same registry, a tool can never behave differently
+depending on how it was called.
 """
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
-from ..models import ChangeUnit, MethodContext
-from .tools import ToolError, call_tool
+from .base_server import MCPServer, ToolError
 
-
-def _targets_for(units: Sequence[ChangeUnit]) -> List[Dict[str, Any]]:
-    targets = []
-    for u in units:
-        targets.append({
-            "file_path": u.file_path,
-            "class_name": u.class_name,
-            "method_name": u.method.name if u.method else "",
-        })
-    return targets
+# server key -> module exposing `build_server()`
+SERVERS: Dict[str, str] = {
+    "git_file": "codetest.mcp.git_file.server",
+    "ast_flow": "codetest.mcp.ast_flow.server",
+    "test_exec": "codetest.mcp.test_exec.server",
+}
 
 
-class AstMcpClient:
-    """Common surface used by the pipeline."""
+def _load_server(key: str) -> MCPServer:
+    import importlib
+
+    module_name = SERVERS.get(key)
+    if module_name is None:
+        raise ToolError(f"unknown MCP server: {key}")
+    return importlib.import_module(module_name).build_server()
+
+
+class McpClient:
+    """Base client: ``call(tool, args) -> dict``."""
 
     transport = "abstract"
 
-    def method_contexts(
-        self, project_dir: Path, units: Sequence[ChangeUnit]
-    ) -> List[MethodContext]:
+    def __init__(self, server_key: str):
+        self.server_key = server_key
+
+    def call(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
 
-    def attach_contexts(
-        self, project_dir: Path, units: Sequence[ChangeUnit]
-    ) -> List[MethodContext]:
-        """Fetch contexts and attach each one to its ChangeUnit."""
-        contexts = self.method_contexts(project_dir, units)
-        by_target = {(c.class_name, c.method_name): c for c in contexts}
-        attached: List[MethodContext] = []
-        for u in units:
-            key = (u.class_name, u.method.name if u.method else "")
-            ctx = by_target.get(key)
-            if ctx is not None:
-                u.context = ctx
-                attached.append(ctx)
-        return attached
+    def list_tools(self) -> List[str]:
+        raise NotImplementedError
 
 
-class InProcessAstClient(AstMcpClient):
-    """Default transport: the server's tool handlers, called directly."""
-
+class InProcessClient(McpClient):
     transport = "inprocess"
 
-    def method_contexts(
-        self, project_dir: Path, units: Sequence[ChangeUnit]
-    ) -> List[MethodContext]:
-        if not units:
-            return []
-        payload = call_tool("ast_change_context", {
-            "project_dir": str(project_dir),
-            "targets": _targets_for(units),
-        })
-        return [MethodContext.from_dict(d) for d in payload.get("contexts", [])]
+    def __init__(self, server_key: str):
+        super().__init__(server_key)
+        self._server = _load_server(server_key)
+
+    def call(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return self._server.registry.call(tool, arguments)
+
+    def list_tools(self) -> List[str]:
+        return [t["name"] for t in self._server.registry.specs()]
 
 
-class StdioAstClient(AstMcpClient):
-    """Talk to ``python -m codetest.mcp.server`` over JSON-RPC/stdio."""
-
+class StdioClient(McpClient):
     transport = "stdio"
 
-    def __init__(self, command: Optional[List[str]] = None):
-        self.command = command or [sys.executable, "-m", "codetest.mcp.server"]
+    def __init__(self, server_key: str, command: Optional[List[str]] = None):
+        super().__init__(server_key)
+        module = SERVERS.get(server_key)
+        if module is None:
+            raise ToolError(f"unknown MCP server: {server_key}")
+        self.command = command or [sys.executable, "-m", module]
 
-    def method_contexts(
-        self, project_dir: Path, units: Sequence[ChangeUnit]
-    ) -> List[MethodContext]:
-        if not units:
-            return []
-        requests = [
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                        "clientInfo": {"name": "codetest", "version": "0.1.0"}}},
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-             "params": {"name": "ast_change_context",
-                        "arguments": {"project_dir": str(project_dir),
-                                      "targets": _targets_for(units)}}},
-        ]
+    def _roundtrip(self, requests: List[Dict[str, Any]], want_id: int) -> Dict[str, Any]:
         stdin_data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in requests)
-        proc = subprocess.run(
-            self.command, input=stdin_data, capture_output=True, text=True,
-            encoding="utf-8",
-        )
+        proc = subprocess.run(self.command, input=stdin_data, capture_output=True,
+                              text=True, encoding="utf-8")
         if proc.returncode != 0:
-            raise ToolError(proc.stderr.strip() or "AST MCP server failed")
+            raise ToolError(proc.stderr.strip() or f"{self.server_key} MCP server failed")
 
         for line in proc.stdout.splitlines():
             line = line.strip()
@@ -115,24 +90,50 @@ class StdioAstClient(AstMcpClient):
                 message = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if message.get("id") != 2:
-                continue
-            result = message.get("result") or {}
-            payload = result.get("structuredContent")
-            if payload is None:
-                content = result.get("content") or [{}]
-                try:
-                    payload = json.loads(content[0].get("text", "{}"))
-                except json.JSONDecodeError:
-                    payload = {}
-            return [MethodContext.from_dict(d) for d in payload.get("contexts", [])]
-        return []
+            if message.get("id") == want_id:
+                return message.get("result") or {}
+        return {}
+
+    @staticmethod
+    def _handshake() -> List[Dict[str, Any]]:
+        return [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                        "clientInfo": {"name": "codetest", "version": "0.1.0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        ]
+
+    def call(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        result = self._roundtrip([
+            *self._handshake(),
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": tool, "arguments": arguments}},
+        ], want_id=2)
+
+        if result.get("isError"):
+            content = result.get("content") or [{}]
+            raise ToolError(content[0].get("text", "MCP tool failed"))
+        payload = result.get("structuredContent")
+        if payload is None:
+            content = result.get("content") or [{}]
+            try:
+                payload = json.loads(content[0].get("text", "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+        return payload
+
+    def list_tools(self) -> List[str]:
+        result = self._roundtrip([
+            *self._handshake(),
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ], want_id=2)
+        return [t["name"] for t in result.get("tools", [])]
 
 
-def get_ast_client(transport: str = "inprocess") -> AstMcpClient:
+def get_client(server_key: str, transport: str = "inprocess") -> McpClient:
     transport = (transport or "inprocess").lower()
     if transport in ("inprocess", "in-process", "local"):
-        return InProcessAstClient()
+        return InProcessClient(server_key)
     if transport == "stdio":
-        return StdioAstClient()
-    raise ValueError(f"unknown AST MCP transport: {transport}")
+        return StdioClient(server_key)
+    raise ValueError(f"unknown MCP transport: {transport}")

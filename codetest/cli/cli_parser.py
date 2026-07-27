@@ -1,4 +1,4 @@
-"""`codetest` CLI (Typer).
+"""`codetest` 명령어 파싱 (Typer).
 
 Commands (per the spec):
 
@@ -6,8 +6,8 @@ Commands (per the spec):
     codetest run --stage     generate + test for staged changes, report
     codetest generate        generate test code only (Git Working Tree changes)
     codetest test            run the test in <project>/src/test/test.txt, report
-    codetest features        inspect the AST feature DB (persisted runs only)
-    codetest mcp-serve       run the AST MCP server on stdio
+    codetest features        inspect the persisted feature DB
+    codetest mcp-serve       run one of the MCP servers on stdio
 """
 from __future__ import annotations
 
@@ -24,10 +24,11 @@ from typing import Optional
 
 import typer
 
-from . import pipeline, test_txt, ui
-from .config import Config
-from .db import SQLiteFeatureDB
-from .git_analyzer import GitError
+from ..agent import pipeline
+from ..config import Config
+from ..mcp.git_file.git_tool import GitError
+from ..storage import SQLiteFeatureDB
+from . import test_txt_handler, ui_renderer
 
 app = typer.Typer(
     add_completion=False,
@@ -37,17 +38,17 @@ app = typer.Typer(
 
 
 def _cfg(project: Optional[str], llm: Optional[str], persist: bool = False,
-         ignore_whitespace: bool = True, ast_mcp: Optional[str] = None) -> Config:
+         ignore_whitespace: bool = True, mcp: Optional[str] = None) -> Config:
     return Config.resolve(project, llm, persist=persist,
                           ignore_whitespace=ignore_whitespace,
                           ignore_blank_lines=ignore_whitespace,
-                          ast_mcp_transport=ast_mcp)
+                          mcp_transport=mcp)
 
 
 def _finish(report, show: Optional[str], no_interactive: bool) -> None:
-    ui.render_report(report, show=show)
+    ui_renderer.render_report(report, show=show)
     if not no_interactive and show is None and report.items:
-        ui.interactive(report)
+        ui_renderer.interactive(report)
 
 
 # Shared options
@@ -63,8 +64,8 @@ _PersistOpt = typer.Option(False, "--persist",
                                 "Default: 세션 파이프라인은 메모리에서만 처리.")
 _WhitespaceOpt = typer.Option(True, "--ignore-whitespace/--no-ignore-whitespace",
                               help="공백/줄바꿈만 바뀐 변경을 diff에서 무시 (기본: 무시).")
-_AstMcpOpt = typer.Option(None, "--ast-mcp",
-                          help="AST MCP transport: inprocess (default) | stdio.")
+_McpOpt = typer.Option(None, "--mcp",
+                       help="MCP transport: inprocess (default) | stdio.")
 
 
 @app.command()
@@ -77,10 +78,10 @@ def run(
     no_interactive: bool = _NoInteractiveOpt,
     persist: bool = _PersistOpt,
     ignore_whitespace: bool = _WhitespaceOpt,
-    ast_mcp: Optional[str] = _AstMcpOpt,
+    mcp: Optional[str] = _McpOpt,
 ):
     """Generate tests for changed files, run them, and report."""
-    cfg = _cfg(project, llm, persist, ignore_whitespace, ast_mcp)
+    cfg = _cfg(project, llm, persist, ignore_whitespace, mcp)
     mode = "staged" if stage else "working"
     cmd = "run --stage" if stage else "run"
     try:
@@ -101,10 +102,10 @@ def generate(
     no_interactive: bool = _NoInteractiveOpt,
     persist: bool = _PersistOpt,
     ignore_whitespace: bool = _WhitespaceOpt,
-    ast_mcp: Optional[str] = _AstMcpOpt,
+    mcp: Optional[str] = _McpOpt,
 ):
     """Generate test code only (no execution) from Git Working Tree changes."""
-    cfg = _cfg(project, llm, persist, ignore_whitespace, ast_mcp)
+    cfg = _cfg(project, llm, persist, ignore_whitespace, mcp)
     mode = "staged" if stage else "working"
     try:
         report = pipeline.build_report(cfg, mode, "generate", run_tests_flag=False)
@@ -124,7 +125,7 @@ def test(
 ):
     """Run the test stored in <project>/src/test/test.txt and report."""
     cfg = _cfg(project, llm, persist)
-    report = test_txt.build_report_from_txt(cfg, "test")
+    report = test_txt_handler.handle(cfg, "test")
     _finish(report, show, no_interactive)
 
 
@@ -157,10 +158,21 @@ def features(
 
 
 @app.command("mcp-serve")
-def mcp_serve():
-    """Run the AST MCP server on stdio (for an external MCP host)."""
-    from .mcp.server import main as serve_main
-    serve_main()
+def mcp_serve(
+    server: str = typer.Argument("ast_flow",
+                                 help="git_file | ast_flow | test_exec"),
+):
+    """Run an MCP server on stdio (for an external MCP host)."""
+    import importlib
+
+    from ..mcp import SERVERS
+
+    module_name = SERVERS.get(server)
+    if module_name is None:
+        typer.secho(f"unknown MCP server: {server} (choose: {', '.join(SERVERS)})",
+                    fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    importlib.import_module(module_name).main()
 
 
 if __name__ == "__main__":

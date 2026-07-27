@@ -1,8 +1,7 @@
-"""Change-intent classification and importance scoring.
+"""결정론적 의도/중요도 규칙 (baseline · 폴백 · 병합).
 
-Since the intent analysis and the test generation are now served by a **single**
-LLM call (see :mod:`codetest.generator`), this module is no longer a separate
-pipeline stage. It plays two roles instead:
+Since intent analysis and test generation are served by a **single** LLM call,
+this is no longer a pipeline stage. It plays two roles instead:
 
 * it produces the deterministic baseline analysis (``analyze_unit``) that the
   mock backend returns as part of that one call, and that any real backend
@@ -17,7 +16,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Sequence, Tuple
 
-from .models import ChangeUnit, UnitAnalysis
+from ..models import ChangeUnit, UnitAnalysis
 
 _CONDITION_TOKENS = ("if", "else", "switch", "case", "&&", "||", "?", "==", "!=", ">=", "<=")
 _PERF_TOKENS = ("cache", "parallel", "stream", "async", "@Cacheable", "batch",
@@ -36,8 +35,7 @@ def _count_tokens(lines: Sequence[str], tokens: Tuple[str, ...]) -> int:
 
 def classify_intent(unit: ChangeUnit) -> Tuple[str, str]:
     """Return (intent, human-readable reason) for a change unit."""
-    added = unit.added_lines
-    removed = unit.removed_lines
+    added, removed = unit.added_lines, unit.removed_lines
 
     feat = _count_tokens(added, _FEATURE_TOKENS)
     cond = _count_tokens(added, _CONDITION_TOKENS)
@@ -87,17 +85,9 @@ def score_importance(unit: ChangeUnit, intent_kind: str = "") -> Tuple[str, str]
         factors.append(f"변경 규모가 보통({churn}줄, +1)")
 
     if unit.context and unit.context.dependency_beans:
-        factors.append(
-            "의존 Bean " + ", ".join(unit.context.dependency_beans) + "에 파급 가능"
-        )
+        factors.append("의존 Bean " + ", ".join(unit.context.dependency_beans) + "에 파급 가능")
 
-    if score >= 6:
-        level = "High"
-    elif score >= 3:
-        level = "Mid"
-    else:
-        level = "Low"
-
+    level = "High" if score >= 6 else "Mid" if score >= 3 else "Low"
     reason = f"점수 {score} → {level} · " + (" / ".join(factors) if factors else "특이 요인 없음")
     return level, reason
 
@@ -107,11 +97,8 @@ def analyze_unit(unit: ChangeUnit) -> UnitAnalysis:
     kind, reason = classify_intent(unit)
     level, importance_reason = score_importance(unit, kind)
     return UnitAnalysis(
-        unit_key=unit.display_name,
-        intent=kind,
-        intent_reason=reason,
-        importance=level,
-        importance_reason=importance_reason,
+        unit_key=unit.display_name, intent=kind, intent_reason=reason,
+        importance=level, importance_reason=importance_reason,
     )
 
 
@@ -142,9 +129,7 @@ def apply_analyses(
     applied: List[UnitAnalysis] = []
 
     for unit in units:
-        analysis = by_key.get(unit.display_name)
-        if analysis is None:
-            analysis = analyze_unit(unit)
+        analysis = by_key.get(unit.display_name) or analyze_unit(unit)
         analysis = normalize(analysis, unit)
         unit.intent = analysis.intent
         unit.intent_reason = analysis.intent_reason

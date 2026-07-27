@@ -1,6 +1,6 @@
-"""LLM client interface.
+"""LLM 통신 인터페이스 (OpenAI / Anthropic 등 공통).
 
-The analysis and the generation stages were merged into **one** API call:
+The analysis and the generation stages are merged into **one** API call:
 :meth:`LLMClient.analyze_and_generate` sends a single request and gets back
 both [의도/중요도 분석 근거] and [테스트 코드] in one response
 (:class:`~codetest.models.CombinedAnalysis`).
@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
-from ..models import ChangeUnit, CombinedAnalysis, MethodContext
+from ...models import (ChangeUnit, CombinedAnalysis, FlowSummary, MethodContext)
 
 
 @dataclass
@@ -21,9 +21,9 @@ class TestGenRequest:
     ``units`` are bundled together so that, per the spec, a change spanning
     several files is covered by a single business-flow test.
 
-    ``contexts`` is what the AST MCP server forwarded — the changed method's
-    signature, its dependency bean names and a call-order summary. The full
-    source/AST is intentionally *not* part of the request.
+    ``contexts`` is what the AST & Flow MCP server forwarded — each changed
+    method's signature, its dependency bean names and a call-order summary.
+    The full source/AST is intentionally *not* part of the request.
     """
 
     __test__ = False   # not a pytest test class despite the name
@@ -31,10 +31,11 @@ class TestGenRequest:
     units: List[ChangeUnit]
     project_package: str
     contexts: List[MethodContext] = field(default_factory=list)
+    flow: Optional[FlowSummary] = None
     feature_summary: str = ""
 
     def prompt_context(self) -> str:
-        """The filtered AST block embedded in the request."""
+        """The pruned AST block embedded in the request."""
         if not self.contexts:
             return "(AST MCP 컨텍스트 없음)"
         return "\n".join(c.as_prompt_block() for c in self.contexts)

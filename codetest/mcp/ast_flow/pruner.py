@@ -1,4 +1,4 @@
-"""Build the *filtered* AST context served by the AST MCP server.
+"""가지치기(Pruning) — AST를 LLM에 보낼 최소 컨텍스트로 축약.
 
 A changed Java file's full source (or full AST) is far more than the model
 needs — and it is the single biggest driver of prompt size. This module
@@ -8,16 +8,17 @@ reduces a change down to exactly three fields:
 2. 의존 Bean 클래스의 이름 목록    (``dependency_beans``)
 3. 호출 순서 요약 텍스트           (``call_flow``)
 
-Everything else (imports, unrelated methods, javadoc, field bodies) is
-dropped before the payload leaves the server.
+Everything else (imports, unrelated methods, javadoc, field bodies) is dropped
+before the payload leaves the server.
 """
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .ast_analyzer import ClassInfo
-from .models import MethodContext, MethodInfo
+from ...models import ClassInfo, MethodContext, MethodInfo
+from . import ast_tool
 
 # Types that are data/utility, never an injected collaborator.
 _NON_BEAN_TYPES = {
@@ -59,8 +60,7 @@ _ACCESSOR_RE = re.compile(r"^(get|is|set|has)[A-Z_]")
 
 def _simple_type(raw: str) -> str:
     """``com.foo.OrderRepository<Long>`` -> ``OrderRepository``."""
-    raw = raw.split("<", 1)[0].strip()
-    return raw.rsplit(".", 1)[-1]
+    return raw.split("<", 1)[0].strip().rsplit(".", 1)[-1]
 
 
 def _looks_like_bean(type_name: str) -> bool:
@@ -69,10 +69,6 @@ def _looks_like_bean(type_name: str) -> bool:
     if type_name in _NON_BEAN_TYPES:
         return False
     return type_name.endswith(_BEAN_SUFFIXES)
-
-
-def _method_line_ranges(cls: ClassInfo) -> List[Tuple[int, int]]:
-    return [(m.start_line, m.end_line) for m in cls.methods]
 
 
 def _declared_fields(
@@ -110,18 +106,13 @@ def _constructor_param_types(source: str, class_name: str) -> List[Tuple[str, st
         rf"(?:public|protected)?\s*{re.escape(class_name)}\s*\((?P<params>[^)]*)\)\s*\{{",
         re.DOTALL,
     )
-    out: List[Tuple[str, str]] = []
     m = pattern.search(source)
-    if not m:
-        return out
-    params = m.group("params").strip()
-    if not params:
-        return out
+    if not m or not m.group("params").strip():
+        return []
+
     # Split on commas that are not inside generics.
-    depth = 0
-    current = ""
-    chunks: List[str] = []
-    for ch in params:
+    depth, current, chunks = 0, "", []
+    for ch in m.group("params"):
         if ch == "<":
             depth += 1
         elif ch == ">":
@@ -133,6 +124,7 @@ def _constructor_param_types(source: str, class_name: str) -> List[Tuple[str, st
             current += ch
     chunks.append(current)
 
+    out: List[Tuple[str, str]] = []
     for chunk in chunks:
         cleaned = re.sub(r"@\w+(\([^)]*\))?", " ", chunk).replace("final ", " ").strip()
         cleaned = re.sub(r"<[^>]*>", "", cleaned)
@@ -165,18 +157,20 @@ def collect_dependency_beans(
 
     for type_name, field_name in _constructor_param_types(source, cls.name):
         add(type_name, field_name, force=True)
-    for type_name, field_name, injected in _declared_fields(lines, _method_line_ranges(cls)):
+    ranges = [(m.start_line, m.end_line) for m in cls.methods]
+    for type_name, field_name, injected in _declared_fields(lines, ranges):
         add(type_name, field_name, force=injected)
 
     return beans, by_field
 
 
 def summarize_call_flow(
-    source: str, method: Optional[MethodInfo], field_types: Dict[str, str], limit: int = 12
+    source: str, method: Optional[MethodInfo], field_types: Dict[str, str],
+    limit: int = 12,
 ) -> str:
     """Summarize the call order inside the changed method as one line.
 
-    e.g. ``OrderRepository.findById() → DiscountPolicy.apply() → OrderRepository.save()``
+    e.g. ``DiscountPolicy.apply() → OrderRepository.save()``
     """
     if method is None:
         return ""
@@ -213,7 +207,7 @@ def build_method_context(
     class_name: str,
     method_name: Optional[str] = None,
 ) -> MethodContext:
-    """Filter a parsed file down to the MCP payload for one changed target."""
+    """Prune a parsed file down to the MCP payload for one changed target."""
     cls = next((c for c in classes if c.name == class_name), None)
     if cls is None:
         cls = classes[0] if classes else ClassInfo(name=class_name, package="", methods=[])
@@ -239,4 +233,88 @@ def build_method_context(
         method_signature=signature,
         dependency_beans=beans,
         call_flow=call_flow,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# MCP tools
+# --------------------------------------------------------------------------- #
+
+_TARGET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "file_path": {"type": "string"},
+        "class_name": {"type": "string", "description": "생략 시 첫 클래스"},
+        "method_name": {"type": "string", "description": "생략 시 클래스 레벨 요약"},
+    },
+    "required": ["file_path"],
+}
+
+METHOD_CONTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_dir": {"type": "string"},
+        "file_path": {"type": "string"},
+        "class_name": {"type": "string"},
+        "method_name": {"type": "string"},
+    },
+    "required": ["project_dir", "file_path"],
+}
+
+CHANGE_CONTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_dir": {"type": "string"},
+        "targets": {"type": "array", "items": _TARGET_SCHEMA},
+    },
+    "required": ["project_dir", "targets"],
+}
+
+
+def _one_context(project_dir: Path, target: dict) -> dict:
+    from ..base_server import ToolError
+
+    file_path = target.get("file_path")
+    if not file_path:
+        raise ToolError("file_path is required")
+    abs_path = (project_dir / file_path).resolve()
+    if not abs_path.exists():
+        raise ToolError(f"file not found: {file_path}")
+
+    source = abs_path.read_text(encoding="utf-8", errors="replace")
+    classes = ast_tool.analyze_file(abs_path)
+    class_name = target.get("class_name") or (classes[0].name if classes else Path(file_path).stem)
+    ctx = build_method_context(source, classes, file_path, class_name,
+                               target.get("method_name") or None)
+    return ctx.to_dict()
+
+
+def tool_method_context(args: dict) -> dict:
+    return _one_context(Path(args["project_dir"]), args)
+
+
+def tool_change_context(args: dict) -> dict:
+    from ..base_server import ToolError
+
+    project_dir = Path(args["project_dir"])
+    contexts, errors = [], []
+    for target in args.get("targets", []):
+        try:
+            contexts.append(_one_context(project_dir, target))
+        except ToolError as e:
+            errors.append(str(e))
+    return {"contexts": contexts, "errors": errors}
+
+
+def register(registry) -> None:
+    registry.register(
+        "ast_method_context",
+        "변경된 대상 메서드의 시그니처 / 의존 Bean 클래스 이름 목록 / 호출 순서 "
+        "요약만 필터링해 반환합니다 (전체 소스·AST는 반환하지 않음).",
+        METHOD_CONTEXT_SCHEMA, tool_method_context,
+    )
+    registry.register(
+        "ast_change_context",
+        "여러 변경 대상을 한 번에 조회하는 배치 버전.",
+        CHANGE_CONTEXT_SCHEMA, tool_change_context,
     )

@@ -1,4 +1,4 @@
-"""Terminal UI (Rich) implementing the spec's [결과 예시] layout.
+"""Terminal UI (Rich) — [결과 예시] 렌더링.
 
 Each result shows the feature importance (High/Mid/Low) and two expandable
 entries: <Test Code 보기> (the generated code + why it was written) and
@@ -14,7 +14,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from .models import Report, ReportItem
+from ..models import Report, ReportItem
 
 console = Console()
 
@@ -98,7 +98,8 @@ def show_test_code(item: ReportItem) -> None:
     meta.append("LLM 호출 : ", style="bold")
     meta.append(f"{art.llm_calls}회 (의도·중요도 분석 + 테스트 코드 동시 수신)\n")
     meta.append("변경 의도 : ", style="bold")
-    meta.append(f"{_INTENT_KO.get(item.unit.intent, item.unit.intent)} — {item.unit.intent_reason}\n")
+    meta.append(f"{_INTENT_KO.get(item.unit.intent, item.unit.intent)} — "
+                f"{item.unit.intent_reason}\n")
     meta.append("중요도 근거: ", style="bold")
     meta.append(f"{item.unit.importance_reason or '(근거 없음)'}\n")
 
@@ -108,6 +109,8 @@ def show_test_code(item: ReportItem) -> None:
         meta.append(f"  • 시그니처  : {ctx.method_signature}\n")
         meta.append(f"  • 의존 Bean : {', '.join(ctx.dependency_beans) or '없음'}\n")
         meta.append(f"  • 호출 순서 : {ctx.call_flow or '없음'}\n")
+    if art.flow and art.flow.steps:
+        meta.append(f"  • 비즈니스 흐름: {art.flow.summary}\n")
 
     meta.append("\n사고 과정(chain-of-thought):\n", style="bold")
     for i, step in enumerate(r.steps, 1):
@@ -145,7 +148,10 @@ def show_test_result(item: ReportItem) -> None:
     body.append(f"total={r.total}, fail={r.failures}, error={r.errors}, "
                 f"skip={r.skipped}, {r.duration_s}s\n")
     cov = f"{r.coverage_pct}%" if r.coverage_pct is not None else "N/A (JaCoCo)"
-    body.append("커버리지: ", style="bold"); body.append(f"{cov}\n\n")
+    body.append("커버리지: ", style="bold"); body.append(cov)
+    if r.branch_coverage_pct is not None:
+        body.append(f"  ·  분기 커버리지: {r.branch_coverage_pct}%")
+    body.append("\n\n")
 
     v_style = {"valid": "green", "invalid": "red",
                "inconclusive": "yellow"}.get(r.validity, "white")
@@ -178,13 +184,9 @@ def interactive(report: Report) -> None:
                 show_test_code(item)
                 show_test_result(item)
             continue
-        m = choice[:-1]
-        kind = choice[-1:]
+        m, kind = choice[:-1], choice[-1:]
         if m.isdigit() and 1 <= int(m) <= len(report.items) and kind in ("c", "r"):
             item = report.items[int(m) - 1]
-            if kind == "c":
-                show_test_code(item)
-            else:
-                show_test_result(item)
+            show_test_code(item) if kind == "c" else show_test_result(item)
         else:
             console.print("[red]입력 형식: <번호>c / <번호>r / a / q[/]")

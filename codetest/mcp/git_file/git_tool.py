@@ -1,78 +1,26 @@
-"""Git-based change detection.
+"""Git Tool — Staged/Unstaged Diff 조회 (노이즈 필터링).
 
-Two modes map to the spec's local vs. staging distinction:
-
-* ``working``  - changes in the working tree that have NOT been staged yet
-                 (``codetest run`` / ``codetest generate``).
-* ``staged``   - changes that have been promoted to the staging area
-                 (``codetest run --stage``).
-
-Formatting-only edits are noise for a test generator, so by default the diff
-is taken with whitespace and blank-line changes ignored (:class:`DiffOptions`).
-A file whose entire diff is whitespace/newline churn is dropped from the scan
+Formatting-only edits are noise for a test generator, so the diff is taken
+with whitespace and blank-line changes ignored by default
+(:class:`~codetest.models.DiffOptions`). A file whose entire diff is
+whitespace/newline churn is dropped from the scan and reported separately
 instead of producing a pointless test.
 """
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
+
+from ...models import DEFAULT_DIFF_OPTIONS, DiffOptions, DiffScan, FileDiff
 
 
 class GitError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class DiffOptions:
-    """How aggressively to filter noise out of the diff.
-
-    ``ignore_whitespace``  - 들여쓰기/정렬 등 공백만 바뀐 변경 무시 (git ``-w``).
-    ``ignore_blank_lines`` - 의미 없는 빈 줄 추가/삭제 무시 (git ``--ignore-blank-lines``).
-    """
-
-    ignore_whitespace: bool = True
-    ignore_blank_lines: bool = True
-
-    def git_flags(self) -> List[str]:
-        flags: List[str] = []
-        if self.ignore_whitespace:
-            flags += ["--ignore-all-space", "--ignore-space-at-eol"]
-        if self.ignore_blank_lines:
-            flags.append("--ignore-blank-lines")
-        return flags
-
-
-DEFAULT_DIFF_OPTIONS = DiffOptions()
-
-
-@dataclass
-class FileDiff:
-    path: str            # repo-relative
-    diff_text: str
-    added_lines: List[str]
-    removed_lines: List[str]
-    changed_new_lines: List[int]   # line numbers in the NEW version of the file
-    is_new_file: bool
-
-
-@dataclass
-class DiffScan:
-    """Result of one scan: the meaningful diffs plus what was filtered out."""
-
-    diffs: List[FileDiff] = field(default_factory=list)
-    skipped_whitespace_only: List[str] = field(default_factory=list)
-    options: DiffOptions = DEFAULT_DIFF_OPTIONS
-
-
 def _run_git(args: List[str], cwd: Path) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-    )
+    proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
     if proc.returncode != 0:
         raise GitError(proc.stderr.strip() or f"git {' '.join(args)} failed")
     return proc.stdout
@@ -80,8 +28,7 @@ def _run_git(args: List[str], cwd: Path) -> str:
 
 def is_git_repo(cwd: Path) -> bool:
     try:
-        out = _run_git(["rev-parse", "--is-inside-work-tree"], cwd)
-        return out.strip() == "true"
+        return _run_git(["rev-parse", "--is-inside-work-tree"], cwd).strip() == "true"
     except GitError:
         return False
 
@@ -138,14 +85,12 @@ def _changed_java_paths(
 
 def _is_noise(line: str, options: DiffOptions) -> bool:
     """True for a +/- line that carries no semantic change."""
-    if options.ignore_blank_lines and not line.strip():
-        return True
-    return False
+    return options.ignore_blank_lines and not line.strip()
 
 
-def _parse_hunks(
+def parse_hunks(
     diff_text: str, options: DiffOptions = DEFAULT_DIFF_OPTIONS
-) -> tuple[List[str], List[str], List[int]]:
+) -> Tuple[List[str], List[str], List[int]]:
     """Extract added/removed lines and NEW-file line numbers touched.
 
     Blank/whitespace-only +/- lines are skipped when the options say so, but
@@ -156,6 +101,7 @@ def _parse_hunks(
     changed_new_lines: List[int] = []
     new_ln = 0
     in_hunk = False
+
     for line in diff_text.splitlines():
         if line.startswith("@@"):
             # @@ -a,b +c,d @@
@@ -196,7 +142,7 @@ def scan_changes(
 
     flags = options.git_flags()
     paths, untracked, whitespace_only = _changed_java_paths(cwd, mode, options)
-    scan = DiffScan(options=options, skipped_whitespace_only=list(whitespace_only))
+    scan = DiffScan(skipped_whitespace_only=list(whitespace_only))
 
     for path in paths:
         is_new = path in untracked
@@ -210,29 +156,57 @@ def scan_changes(
         else:
             diff_text = _run_git(["diff", *flags, "--", path], cwd)
 
-        added, removed, changed = _parse_hunks(diff_text, options)
+        added, removed, changed = parse_hunks(diff_text, options)
         if not is_new and not added and not removed:
             # Everything git reported for this file was whitespace / blank lines.
             scan.skipped_whitespace_only.append(path)
             continue
 
-        scan.diffs.append(
-            FileDiff(
-                path=path,
-                diff_text=diff_text,
-                added_lines=added,
-                removed_lines=removed,
-                changed_new_lines=changed,
-                is_new_file=is_new,
-            )
-        )
+        scan.diffs.append(FileDiff(
+            path=path, diff_text=diff_text, added_lines=added, removed_lines=removed,
+            changed_new_lines=changed, is_new_file=is_new,
+        ))
     return scan
 
 
 def get_file_diffs(
-    cwd: Path,
-    mode: str = "working",
-    options: DiffOptions = DEFAULT_DIFF_OPTIONS,
+    cwd: Path, mode: str = "working", options: DiffOptions = DEFAULT_DIFF_OPTIONS
 ) -> List[FileDiff]:
     """Return per-file diffs for all meaningfully changed Java files in ``mode``."""
     return scan_changes(cwd, mode, options).diffs
+
+
+# --------------------------------------------------------------------------- #
+# MCP tool
+# --------------------------------------------------------------------------- #
+
+SCAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_dir": {"type": "string", "description": "git 저장소 루트"},
+        "mode": {"type": "string", "enum": ["working", "staged"],
+                 "description": "working=미스테이징 변경, staged=스테이징된 변경"},
+        "ignore_whitespace": {"type": "boolean", "description": "공백만 바뀐 변경 무시 (기본 true)"},
+        "ignore_blank_lines": {"type": "boolean", "description": "빈 줄 변경 무시 (기본 true)"},
+    },
+    "required": ["project_dir"],
+}
+
+
+def tool_scan_changes(args: dict) -> dict:
+    options = DiffOptions(
+        ignore_whitespace=bool(args.get("ignore_whitespace", True)),
+        ignore_blank_lines=bool(args.get("ignore_blank_lines", True)),
+    )
+    scan = scan_changes(Path(args["project_dir"]), args.get("mode", "working"), options)
+    return scan.to_dict()
+
+
+def register(registry) -> None:
+    registry.register(
+        "git_scan_changes",
+        "변경된 Java 파일의 diff를 조회합니다. 공백/빈 줄만 바뀐 파일은 제외하고 "
+        "제외 목록을 함께 반환합니다.",
+        SCAN_SCHEMA,
+        tool_scan_changes,
+    )

@@ -1,33 +1,27 @@
-"""Java AST analysis using ``javalang``.
+"""AST Tool — Java AST 파싱 및 변경 라인 ↔ 메서드 매핑.
 
-Responsibilities:
+Uses ``javalang`` with a pure-regex fallback, so a file that fails to parse
+mid-edit degrades gracefully instead of breaking the run. Parsed results are
+memoized by file fingerprint (:mod:`codetest.storage.cache_service`), so
+unchanged files are never re-parsed within a session.
 
-* Parse a Java source file into classes/methods (used to populate the
-  feature DB and to map changed line numbers to the enclosing method).
-* A pure-regex fallback is used if a file fails to parse (e.g. partial/
-  invalid syntax mid-edit), so the pipeline degrades gracefully.
+Pruning (what actually gets sent to the model) lives in :mod:`.pruner`; this
+module stays a faithful representation of the file.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
-from .models import MethodInfo
+from ...models import ClassInfo, MethodInfo
+from ...storage.cache_service import AstCache, default_cache
 
 try:
     import javalang  # type: ignore
     _HAVE_JAVALANG = True
 except Exception:  # pragma: no cover - import guard
     _HAVE_JAVALANG = False
-
-
-@dataclass
-class ClassInfo:
-    name: str
-    package: str
-    methods: List[MethodInfo]
 
 
 _METHOD_RE = re.compile(
@@ -66,16 +60,11 @@ def _parse_with_javalang(source: str) -> List[ClassInfo]:
             )
             ret = getattr(m, "return_type", None)
             ret_name = ret.name if ret and hasattr(ret, "name") else "void"
-            methods.append(
-                MethodInfo(
-                    name=m.name,
-                    signature=f"{m.name}({params})",
-                    start_line=line,
-                    end_line=line,
-                    modifiers=list(m.modifiers),
-                    return_type=ret_name,
-                )
-            )
+            methods.append(MethodInfo(
+                name=m.name, signature=f"{m.name}({params})",
+                start_line=line, end_line=line,
+                modifiers=list(m.modifiers), return_type=ret_name,
+            ))
         _method_end_lines(methods, total_lines)
         classes.append(ClassInfo(name=node.name, package=package, methods=methods))
     return classes
@@ -95,16 +84,11 @@ def _parse_with_regex(source: str) -> List[ClassInfo]:
             continue
         start_line = source.count("\n", 0, m.start()) + 1
         mods = [w for w in (m.group("mods") or "").split() if w]
-        methods.append(
-            MethodInfo(
-                name=name,
-                signature=f"{name}(...)",
-                start_line=start_line,
-                end_line=start_line,
-                modifiers=mods,
-                return_type=(m.group("ret") or "void").strip(),
-            )
-        )
+        methods.append(MethodInfo(
+            name=name, signature=f"{name}(...)",
+            start_line=start_line, end_line=start_line,
+            modifiers=mods, return_type=(m.group("ret") or "void").strip(),
+        ))
     _method_end_lines(methods, total_lines)
     return [ClassInfo(name=class_name, package=package, methods=methods)]
 
@@ -119,19 +103,65 @@ def analyze_source(source: str) -> List[ClassInfo]:
     return _parse_with_regex(source)
 
 
-def analyze_file(path: Path) -> List[ClassInfo]:
-    source = path.read_text(encoding="utf-8", errors="replace")
-    return analyze_source(source)
+def analyze_file(path: Path, cache: Optional[AstCache] = None) -> List[ClassInfo]:
+    """Parse a file, reusing the cached AST when it has not changed."""
+    cache = cache or default_cache()
+    cached = cache.get(path)
+    if cached is not None:
+        return cached
+    classes = analyze_source(path.read_text(encoding="utf-8", errors="replace"))
+    cache.put(path, classes)
+    return classes
 
 
 def find_method_for_lines(
-    classes: List[ClassInfo], changed_lines: List[int]
-) -> List[tuple[str, MethodInfo]]:
+    classes: Sequence[ClassInfo], changed_lines: Sequence[int]
+) -> List[Tuple[str, MethodInfo]]:
     """Return (class_name, method) pairs whose line range intersects changes."""
-    hits: List[tuple[str, MethodInfo]] = []
+    hits: List[Tuple[str, MethodInfo]] = []
     changed = set(changed_lines)
     for c in classes:
         for m in c.methods:
             if any(m.start_line <= ln <= m.end_line for ln in changed):
                 hits.append((c.name, m))
     return hits
+
+
+# --------------------------------------------------------------------------- #
+# MCP tools
+# --------------------------------------------------------------------------- #
+
+PARSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_dir": {"type": "string"},
+        "file_path": {"type": "string"},
+        "changed_lines": {"type": "array", "items": {"type": "integer"},
+                          "description": "주어지면 해당 라인을 포함하는 메서드만 표시"},
+    },
+    "required": ["project_dir", "file_path"],
+}
+
+
+def tool_parse_file(args: dict) -> dict:
+    path = (Path(args["project_dir"]) / args["file_path"]).resolve()
+    classes = analyze_file(path)
+    payload = {"file_path": args["file_path"],
+               "package": classes[0].package if classes else "",
+               "classes": [c.to_dict() for c in classes]}
+    changed = args.get("changed_lines")
+    if changed:
+        payload["changed_methods"] = [
+            {"class_name": name, "method": m.to_dict()}
+            for name, m in find_method_for_lines(classes, changed)
+        ]
+    return payload
+
+
+def register(registry) -> None:
+    registry.register(
+        "ast_parse_file",
+        "Java 파일을 파싱해 클래스/메서드 목록을 반환합니다. changed_lines를 주면 "
+        "해당 라인을 포함하는 메서드도 함께 표시합니다.",
+        PARSE_SCHEMA, tool_parse_file,
+    )

@@ -1,4 +1,8 @@
-"""Runtime configuration for the Code Test agent."""
+"""Runtime configuration: 환경변수, LLM 백엔드, 경로 설정.
+
+Imports only :mod:`codetest.models`, so every layer can read config without
+dragging in a dependency on another layer.
+"""
 from __future__ import annotations
 
 import os
@@ -6,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .git_analyzer import DiffOptions
+from .models import DiffOptions
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -30,7 +34,8 @@ class Config:
             never touches SQLite. True → also mirror features/runs into the DB.
         ignore_whitespace: Ignore whitespace-only diff noise.
         ignore_blank_lines: Ignore meaningless blank-line additions/removals.
-        ast_mcp_transport: How to reach the AST MCP server ("inprocess"|"stdio").
+        mcp_transport: How to reach the MCP servers ("inprocess" | "stdio").
+        enable_cache: Reuse parsed ASTs for files that did not change.
     """
 
     project_dir: Path
@@ -41,7 +46,8 @@ class Config:
     persist: bool = False
     ignore_whitespace: bool = True
     ignore_blank_lines: bool = True
-    ast_mcp_transport: str = "inprocess"
+    mcp_transport: str = "inprocess"
+    enable_cache: bool = True
 
     # Package used for generated tests when the source package is unknown.
     default_test_package: str = "com.example.demo"
@@ -52,7 +58,8 @@ class Config:
                 persist: Optional[bool] = None,
                 ignore_whitespace: Optional[bool] = None,
                 ignore_blank_lines: Optional[bool] = None,
-                ast_mcp_transport: str | None = None) -> "Config":
+                mcp_transport: str | None = None,
+                enable_cache: Optional[bool] = None) -> "Config":
         root = Path(project_dir or os.getcwd()).resolve()
         agent_dir = root / ".codetest"
         return Config(
@@ -67,8 +74,9 @@ class Config:
                                if ignore_whitespace is None else ignore_whitespace),
             ignore_blank_lines=(_env_flag("CODETEST_IGNORE_BLANK_LINES", True)
                                 if ignore_blank_lines is None else ignore_blank_lines),
-            ast_mcp_transport=(ast_mcp_transport
-                               or os.environ.get("CODETEST_AST_MCP", "inprocess")),
+            mcp_transport=(mcp_transport or os.environ.get("CODETEST_MCP", "inprocess")),
+            enable_cache=(_env_flag("CODETEST_CACHE", True)
+                          if enable_cache is None else enable_cache),
         )
 
     def diff_options(self) -> DiffOptions:

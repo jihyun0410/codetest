@@ -1,23 +1,21 @@
-"""Deterministic mock LLM.
+"""로컬 개발/테스트용 Mock LLM 클라이언트.
 
-Emulates what a real Claude client does in **one** round trip: the request
-carries the change units plus the AST MCP context (시그니처 / 의존 Bean / 호출
-순서), and the single response carries both deliverables:
+Emulates what a real client does in **one** round trip: it builds a response in
+the exact contract format and hands it to
+:func:`codetest.agent.prompt_engine.parse_response` — the same parser a real
+backend uses. That means the response contract is exercised on every local run.
 
-1. ``analyses``    - 의도/중요도 분석 근거 for every change unit
-2. ``test_source`` - a compilable ``@SpringBootTest`` JUnit 5 class
-
-Everything is derived from the analyzed change so output is stable and
+Everything is derived from the analyzed change, so output is stable and
 explainable — no randomness, no network.
 """
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from .. import intent
-from ..models import ChangeUnit, CombinedAnalysis, ReasoningTrace, UnitAnalysis
-from .base import LLMClient, TestGenRequest
+from ...models import (ChangeUnit, CombinedAnalysis, ReasoningTrace, UnitAnalysis)
+from .. import intent_rules, prompt_engine
+from .base_client import LLMClient, TestGenRequest
 
 
 def _camel_to_field(name: str) -> str:
@@ -38,24 +36,30 @@ class MockLLMClient(LLMClient):
     # ---- the single call ---------------------------------------------------
     def analyze_and_generate(self, req: TestGenRequest) -> CombinedAnalysis:
         """One call: analyze intent/importance *and* write the test."""
-        analyses = intent.baseline_analyses(req.units)
+        prompt_engine.build_prompt(req)      # 실제 백엔드와 동일 경로를 밟는다
+
+        analyses = intent_rules.baseline_analyses(req.units)
         by_key = {a.unit_key: a for a in analyses}
         reasoning = self._reason(req, by_key)
-        source = self._generate_test(req, reasoning, by_key)
-        return CombinedAnalysis(
-            analyses=analyses, reasoning=reasoning, test_source=source, llm_calls=1
-        )
+        test_code = self._generate_test(req, reasoning, by_key)
+
+        raw = prompt_engine.render_response(analyses, reasoning, test_code)
+        return prompt_engine.parse_response(raw, req.units)
 
     # ---- part 1 of the response: reasoning + 분석 근거 ----------------------
     def _reason(self, req: TestGenRequest,
                 analyses: Dict[str, UnitAnalysis]) -> ReasoningTrace:
-        steps: List[str] = []
-        scenarios: List[str] = []
-
-        steps.append(
+        steps: List[str] = [
             f"변경된 유닛 {len(req.units)}개를 하나의 비즈니스 흐름으로 묶어 "
             "단일 요청에서 분석·생성한다."
-        )
+        ]
+        scenarios: List[str] = []
+
+        if req.flow and req.flow.steps:
+            steps.append(
+                f"[Flow] 다중 파일 호출 순서: {req.flow.summary} "
+                f"(외부 의존 Bean: {', '.join(req.flow.external_beans) or '없음'})"
+            )
         for ctx in req.contexts:
             beans = ", ".join(ctx.dependency_beans) or "없음"
             steps.append(
@@ -71,9 +75,7 @@ class MockLLMClient(LLMClient):
                 )
             scenarios.extend(self._scenarios_for(u, a))
 
-        steps.append(
-            "각 의도에 대해 정상(성공) 케이스와 예외(실패) 케이스를 최소 1개씩 도출한다."
-        )
+        steps.append("각 의도에 대해 정상(성공) 케이스와 예외(실패) 케이스를 최소 1개씩 도출한다.")
         steps.append(
             "@SpringBootTest 컨텍스트에서 대상 빈과 의존 Bean을 주입하고, 도출한 "
             "케이스를 JUnit5 assertion으로 검증하는 테스트를 작성한다."
@@ -88,7 +90,7 @@ class MockLLMClient(LLMClient):
         )
         return ReasoningTrace(steps=steps, scenarios=scenarios, rationale=rationale)
 
-    def _scenarios_for(self, u: ChangeUnit, a: UnitAnalysis | None) -> List[str]:
+    def _scenarios_for(self, u: ChangeUnit, a: Optional[UnitAnalysis]) -> List[str]:
         m = u.method.name if u.method else "changedBehavior"
         kind = a.intent if a else u.intent
         flow = u.context.call_flow if u.context else ""
@@ -129,19 +131,21 @@ class MockLLMClient(LLMClient):
             methods.append(self._render_test_method(i, kind, sc, field, target))
 
         methods_src = "\n\n".join(methods)
-        scenario_doc = "\n".join(f"     *   - {s}" for s in reasoning.scenarios)
+        scenario_doc = "\n".join(f" *   - {s}" for s in reasoning.scenarios)
         units_doc = ", ".join(u.display_name for u in req.units)
         analysis_doc = "\n".join(
-            f"     *   - {a.unit_key}: intent={a.intent} ({a.intent_reason}) / "
+            f" *   - {a.unit_key}: intent={a.intent} ({a.intent_reason}) / "
             f"importance={a.importance}"
             for a in analyses.values()
-        ) or "     *   - (분석 결과 없음)"
+        ) or " *   - (분석 결과 없음)"
         context_doc = "\n".join(
-            f"     *   - {c.target}: {c.method_signature}"
+            f" *   - {c.target}: {c.method_signature}"
             f" | beans=[{', '.join(c.dependency_beans) or '없음'}]"
             f" | flow={c.call_flow or '없음'}"
             for c in req.contexts
-        ) or "     *   - (AST MCP 컨텍스트 없음)"
+        ) or " *   - (AST MCP 컨텍스트 없음)"
+        flow_doc = (f" *\n * Business flow: {req.flow.summary}\n"
+                    if req.flow and req.flow.steps else "")
 
         # Inject the collaborators the AST MCP server reported.
         beans = [b for c in req.contexts for b in c.dependency_beans]
@@ -170,7 +174,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * AST MCP context (signature | dependency beans | call order):
 {context_doc}
- *
+{flow_doc} *
  * Reasoning (chain-of-thought) scenarios:
 {scenario_doc}
  *

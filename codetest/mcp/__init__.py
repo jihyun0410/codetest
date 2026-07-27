@@ -1,21 +1,30 @@
-"""AST MCP server + clients.
+"""[계층 3] MCP Servers — 로컬 환경 제어 Tool 제공자.
 
-The server owns all Java-AST knowledge and exposes it as MCP tools. It filters
-each changed target down to the method signature, the dependency bean class
-names and a call-order summary, so the LLM request stays small and stable.
+Three servers, each independently runnable by any MCP host:
+
+| 서버 | 모듈 | Tool |
+|------|------|------|
+| ① Git & File | ``codetest.mcp.git_file.server`` | ``git_scan_changes``, ``file_read_source``, ``file_write_test`` |
+| ② AST & Flow | ``codetest.mcp.ast_flow.server`` | ``ast_parse_file``, ``ast_method_context``, ``ast_change_context``, ``flow_summary`` |
+| ③ Test Exec  | ``codetest.mcp.test_exec.server`` | ``test_run``, ``coverage_report`` |
+
+Servers depend on :mod:`codetest.models` and :mod:`codetest.storage` only —
+never on the agent or the CLI, so the boundary stays serializable.
 """
 from __future__ import annotations
 
-from .client import (AstMcpClient, InProcessAstClient, StdioAstClient,
-                     get_ast_client)
-from .tools import TOOLS, ToolError, call_tool
+from .base_server import MCPServer, Tool, ToolError, ToolRegistry
+from .client import (SERVERS, InProcessClient, McpClient, StdioClient,
+                     get_client)
 
 __all__ = [
-    "AstMcpClient",
-    "InProcessAstClient",
-    "StdioAstClient",
-    "get_ast_client",
-    "TOOLS",
+    "MCPServer",
+    "Tool",
+    "ToolRegistry",
     "ToolError",
-    "call_tool",
+    "McpClient",
+    "InProcessClient",
+    "StdioClient",
+    "get_client",
+    "SERVERS",
 ]
