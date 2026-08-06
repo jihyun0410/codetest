@@ -1,4 +1,8 @@
-"""설정 · 로깅 · API Key 인증.
+"""Agent 설정 · 로깅 · API Key 인증.
+
+Agent 는 정의서의 "LLM을 사용하여 판단하는 부분" 만 담당한다.
+코드 기반 처리(AST/개요/실행)는 MCP 서비스에 FastAPI 로 위임하므로
+DB/작업 디렉터리 설정이 없고 대신 MCP 접속 설정을 갖는다.
 
 비밀값(ANTHROPIC_API_KEY, API Key)은 코드에 두지 않고 .env / OS 환경변수로만 주입한다.
 """
@@ -9,7 +13,6 @@ import hmac
 import logging
 import sys
 from functools import lru_cache
-from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field, field_validator
@@ -33,11 +36,15 @@ class Settings(BaseSettings):
         default_factory=list, alias="CODETEST_API_KEYS"
     )
 
-    database_url: str = Field(
-        default="sqlite:///./data/codetest.db", alias="CODETEST_DATABASE_URL"
+    # --- MCP 서비스 (코드 기반 처리 위임 대상) ---
+    #: 정의서: "Fast API를 통해 송/수신하는 방식으로 구현"
+    mcp_base_url: str = Field(default="http://localhost:8100", alias="CODETEST_MCP_BASE_URL")
+    mcp_api_key: str = Field(default="", alias="CODETEST_MCP_API_KEY")
+    mcp_timeout_seconds: float = Field(default=120.0, alias="CODETEST_MCP_TIMEOUT")
+    #: Gradle 빌드 + Spring 컨텍스트 기동은 오래 걸린다
+    mcp_execute_timeout_seconds: float = Field(
+        default=960.0, alias="CODETEST_MCP_EXECUTE_TIMEOUT"
     )
-    #: 대상 프로젝트를 clone 해 두는 작업 디렉터리
-    workspace_dir: Path = Field(default=Path("./workspace"), alias="CODETEST_WORKSPACE_DIR")
 
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     llm_model: str = Field(default="claude-opus-5", alias="CODETEST_LLM_MODEL")
@@ -53,11 +60,6 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
-    def ensure_directories(self) -> None:
-        """기동 시 필요한 런타임 디렉터리를 만든다."""
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
-        if self.database_url.startswith("sqlite"):
-            Path(self.database_url.split("///")[-1]).parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)
