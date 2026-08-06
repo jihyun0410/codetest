@@ -1,28 +1,44 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "codetest-agent"
+name = "codetest-agent-server"
 version = "0.1.0"
-description = "CLI-based AI agent that generates and runs Spring Boot tests for changed code (Git Diff + AST + LLM reasoning)."
-readme = "README.md"
+description = "Code Test AI Agent - Agent Server (별도 관리 서버 배포용)"
 requires-python = ">=3.10"
+
 dependencies = [
-    "typer>=0.12",
-    "rich>=13.7",
-    "javalang>=0.13.0",
+    # --- REST API ---
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+
+    # --- DB (Project, Graph Node/Edge, Workflow) ---
+    "SQLAlchemy>=2.0",
+
+    # --- 저장소 clone ---
+    "GitPython>=3.1",
+
+    # --- LLM ---
+    "anthropic>=0.40",
+
+    # --- AST 파싱 (LLM 토큰 미소모) ---
+    "tree-sitter>=0.22",
+    "tree-sitter-language-pack>=0.2",  # Java/JS/TS/Python/XML/SQL 문법 번들
+    "lxml>=5.2",                       # MyBatis XML 파싱
 ]
 
-[project.scripts]
-codetest = "codetest.cli.cli_parser:app"
-codetest-mcp-git-file = "codetest.mcp.git_file.server:main"
-codetest-mcp-ast-flow = "codetest.mcp.ast_flow.server:main"
-codetest-mcp-test-exec = "codetest.mcp.test_exec.server:main"
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",   # fastapi TestClient
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["codetest*"]
+include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests"]
