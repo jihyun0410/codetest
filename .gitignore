@@ -11,6 +11,12 @@ venv/
 # Agent artifacts
 .codetest/
 
+# 로컬 실행물 (.env 는 ANTHROPIC_API_KEY 를 담으므로 절대 커밋 금지)
+.env
+agent-server/data/
+agent-server/workspace/
+.pytest_cache/
+
 # Gradle / Java (sample project)
 .gradle/
 sample-springboot/build/
