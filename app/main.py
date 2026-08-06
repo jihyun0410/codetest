@@ -1,56 +1,45 @@
 """Agent Server 진입점 + REST API.
 
-별도 관리 서버에 배포되는 REST API. 로컬 클라이언트(api_client.AgentClient)가
-이 서버와만 통신한다.
+정의서:
+  "**LLM을 사용하여 판단하는 부분은 Agent**, 코드 기반으로 단순 처리 및 판단을
+   진행하는 부분은 MCP로 구분하여 Fast API를 통해 송/수신하는 방식으로 구현"
+
+이 서버는 LLM 판단만 수행하고, 코드 기반 작업(Git clone·AST·개요 저장·
+@SpringBootTest 주입·JaCoCo 실행)은 전부 MCP 서비스에 FastAPI 로 위임한다.
 
     uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-api_client.py 가 호출하는 5개 엔드포인트 전부:
+Local Client 가 호출하는 엔드포인트:
 
-  AgentClient.health()          GET    /api/v1/health          (인증 불필요)
-  AgentClient.create_project()  POST   /api/v1/projects
-  AgentClient.delete_project()  DELETE /api/v1/projects/{id}
-  AgentClient.generate_tests()  POST   /api/v1/tests/generate
-  AgentClient.report_tests()    POST   /api/v1/tests/report
-
-테스트 **실행**은 로컬 클라이언트가 한다(개발자 환경 의존성이 필요하므로).
-서버는 생성과 판정만 담당한다.
+  GET    /api/v1/health            연결 확인 (인증 불필요)
+  POST   /api/v1/projects          프로젝트 등록      → MCP 위임
+  DELETE /api/v1/projects/{id}     프로젝트 삭제      → MCP 위임
+  POST   /api/v1/tests/generate    codetest generate  (생성만)
+  POST   /api/v1/tests/run         codetest run       (생성 + 실행 + 판정)
+  POST   /api/v1/tests/execute     codetest test      (실행 + 판정)
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timezone
 
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    FastAPI,
-    Header,
-    HTTPException,
-    Request,
-    status,
-)
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from app import testgen
 from app.config import get_logger, settings, setup_logging, verify_api_key
-from app.db import IngestStatus, Project, SessionLocal, get_db, init_db
-from app.graph.builder import GraphBuilder
 from app.llm import LLMRefusalError, LLMUnavailableError
-from app.repo import RepoService
+from app.mcp_client import McpError, mcp_client
 from app.schemas import (
+    ExecuteRequest,
     GenerateRequest,
     GenerateResponse,
     ProjectCreate,
     ProjectRead,
-    ReportRequest,
     ReportResponse,
+    RunRequest,
+    RunResponse,
 )
-from app.workflow import WorkflowGenerator
 
 setup_logging()
 logger = get_logger(__name__)
@@ -66,24 +55,6 @@ def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Ke
         )
 
 
-def _project(db: Session, project_id: str) -> Project:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            f"프로젝트를 찾을 수 없습니다: {project_id}. "
-            "`codetest project register` 로 먼저 등록하세요.",
-        )
-    return project
-
-
-def _to_read(project: Project) -> ProjectRead:
-    """ORM → 응답. github_token 은 보유 여부만 노출한다."""
-    payload = ProjectRead.model_validate(project)
-    payload.has_github_token = bool(project.github_token)
-    return payload
-
-
 @contextmanager
 def _llm_errors():
     """LLM 예외를 클라이언트가 이해할 HTTP 상태로 옮긴다."""
@@ -95,40 +66,61 @@ def _llm_errors():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
 
 
-# --- 백그라운드 수집 ---------------------------------------------------------
-# 수정: create_project 보다 위로 옮김. add_task 는 호출 시점에 이름을 찾으므로
-#      동작은 같지만, 한 파일이 된 이상 정의가 사용보다 앞서는 편이 읽기 쉽다.
-def run_ingest(project_id: str) -> None:
-    """등록 직후 백그라운드: clone → AST 파싱 → Graph 적재 → Workflow 생성."""
-    db = SessionLocal()
-    project = db.get(Project, project_id)
-    if project is None:
-        db.close()
-        return
-
-    project.ingest_status = IngestStatus.RUNNING.value
-    project.ingest_error = None
-    db.commit()
-
+@contextmanager
+def _mcp_errors():
+    """MCP 오류를 그대로 전달한다 — 어느 쪽이 실패했는지 클라이언트가 알아야 한다."""
     try:
-        stats = GraphBuilder(db, project).build_full(reset=True)
-        WorkflowGenerator(db, project.id).generate()
+        yield
+    except McpError as exc:
+        # 404(프로젝트 없음) 등 클라이언트 잘못은 그대로, 나머지는 502 로 올린다.
+        code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+        raise HTTPException(code, str(exc)) from None
 
-        project.ingest_status = IngestStatus.READY.value
-        project.frameworks = stats.frameworks
-        project.language_stats = stats.language_stats
-        project.last_indexed_at = datetime.now(timezone.utc)
-        db.commit()
-        logger.info("[%s] 수집 완료 — 노드 %d, 간선 %d (%.2fs)",
-                    project.name, stats.node_count, stats.edge_count, stats.elapsed_seconds)
-    except Exception as exc:  # 어떤 실패든 상태에 남긴다
-        db.rollback()
-        project.ingest_status = IngestStatus.FAILED.value
-        project.ingest_error = str(exc)
-        db.commit()
-        logger.exception("수집 실패: %s", project_id)
-    finally:
-        db.close()
+
+def _payload_sources(items) -> list[dict]:
+    return [{"path": item.path, "content": item.content} for item in items]
+
+
+def _analyze(payload: GenerateRequest) -> dict:
+    """MCP 에 Git Diff + AST 변경 단위 식별을 요청하고 diff 를 함께 실어 둔다."""
+    with _mcp_errors():
+        analysis = mcp_client.analyze_changes(
+            payload.project_id, payload.diff, _payload_sources(payload.sources)
+        )
+    analysis["diff"] = payload.diff
+    return analysis
+
+
+def _generate(payload: GenerateRequest, analysis: dict) -> GenerateResponse:
+    with _mcp_errors():
+        overview = mcp_client.overview(payload.project_id)
+    with _llm_errors():
+        return testgen.generate(
+            analysis,
+            sources=[(item.path, item.content) for item in payload.sources],
+            scope=payload.scope,
+            project_name=overview.get("name", payload.project_id),
+        )
+
+
+def _execute_and_report(
+    project_id: str,
+    test_code: str,
+    sources: list[dict],
+    base_package: str | None,
+    intent: str,
+    intent_rationale: str,
+) -> ReportResponse:
+    """MCP 로 @SpringBootTest 를 실행하고 LLM 으로 적절성을 판단한다."""
+    if not test_code.strip():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "실행할 Test Code 가 비어 있습니다."
+        )
+
+    with _mcp_errors():
+        execution = mcp_client.execute_tests(project_id, test_code, sources, base_package)
+    with _llm_errors():
+        return testgen.report(execution, test_code, intent, intent_rationale)
 
 
 # --- 라우터 ------------------------------------------------------------------
@@ -137,11 +129,21 @@ router = APIRouter(prefix="/api/v1")
 
 @router.get("/health", tags=["health"], summary="헬스체크")
 def health() -> dict:
-    """연결 확인용 (인증 불필요)."""
-    return {"status": "ok", "app": settings.app_name}
+    """연결 확인용 (인증 불필요). MCP 연결 상태도 함께 알린다."""
+    mcp_status = "ok"
+    try:
+        mcp_client.health()
+    except McpError as exc:
+        mcp_status = f"unreachable: {exc}"
+    return {
+        "status": "ok",
+        "app": settings.app_name,
+        "role": "llm-based",
+        "mcp": {"base_url": settings.mcp_base_url, "status": mcp_status},
+    }
 
 
-# --- 프로젝트 ----------------------------------------------------------------
+# --- 프로젝트 (MCP 위임) ------------------------------------------------------
 projects = APIRouter(
     prefix="/projects", tags=["projects"], dependencies=[Depends(require_api_key)]
 )
@@ -149,34 +151,18 @@ projects = APIRouter(
 
 @projects.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED,
                summary="프로젝트 등록")
-def create_project(
-    payload: ProjectCreate, background: BackgroundTasks, db: Session = Depends(get_db)
-) -> ProjectRead:
-    """등록 후 전체 소스 수집(clone → AST → Graph → Workflow)을 백그라운드로 시작한다."""
-    if db.scalar(select(Project).where(Project.name == payload.name)):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"이미 같은 이름의 프로젝트가 있습니다: {payload.name}",
-        )
-
-    project = Project(**payload.model_dump(), ingest_status=IngestStatus.PENDING.value)
-    db.add(project)
-    db.commit()
-    db.refresh(project)
-
-    background.add_task(run_ingest, project.id)
-    return _to_read(project)
+def create_project(payload: ProjectCreate) -> ProjectRead:
+    """개요 수집(clone + AST + DB 저장)은 코드 기반 작업이므로 MCP 가 수행한다."""
+    with _mcp_errors():
+        created = mcp_client.create_project(**payload.model_dump())
+    return ProjectRead.model_validate(created)
 
 
 @projects.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT,
                  summary="프로젝트 삭제")
-def delete_project(project_id: str, db: Session = Depends(get_db)) -> None:
-    """프로젝트와 그래프/워크플로우를 함께 삭제하고 작업 사본도 제거한다."""
-    project = _project(db, project_id)
-    repo = RepoService(project.id, project.git_url, project.github_token)
-    db.delete(project)
-    db.commit()
-    repo.remove()
+def delete_project(project_id: str) -> None:
+    with _mcp_errors():
+        mcp_client.delete_project(project_id)
 
 
 # --- Test Code ---------------------------------------------------------------
@@ -185,28 +171,46 @@ tests = APIRouter(
 )
 
 
-@tests.post("/generate", response_model=GenerateResponse, summary="Test Code 생성")
-def generate_tests(payload: GenerateRequest, db: Session = Depends(get_db)) -> GenerateResponse:
-    project = _project(db, payload.project_id)
-    with _llm_errors():
-        return testgen.generate(
-            db, project,
-            diff=payload.diff,
-            sources=[(item.path, item.content) for item in payload.sources],
-            scope=payload.scope,
-        )
+@tests.post("/generate", response_model=GenerateResponse,
+            summary="Test Code 생성 (codetest generate)")
+def generate_tests(payload: GenerateRequest) -> GenerateResponse:
+    """
+    Git Working Tree 변경분에 대해 의도를 파악하고 @SpringBootTest 를 생성한다.
+    실행은 하지 않는다.
+    """
+    return _generate(payload, _analyze(payload))
 
 
-@tests.post("/report", response_model=ReportResponse, summary="테스트 결과 판정")
-def report_tests(payload: ReportRequest, db: Session = Depends(get_db)) -> ReportResponse:
-    _project(db, payload.project_id)
-    with _llm_errors():
-        return testgen.report(
-            test_code=payload.test_code,
-            output=payload.output,
-            exit_code=payload.exit_code,
-            language=payload.language,
-        )
+@tests.post("/run", response_model=RunResponse,
+            summary="생성 + 실행 + 판정 (codetest run)")
+def run_tests(payload: RunRequest) -> RunResponse:
+    """정의서 흐름 3~5 를 한 번에 수행한다 (분석 → 생성 → 실행 → 판정)."""
+    analysis = _analyze(payload)
+    generated = _generate(payload, analysis)
+
+    report = _execute_and_report(
+        payload.project_id,
+        generated.test_code,
+        _payload_sources(payload.sources),
+        generated.base_package,
+        generated.intent,
+        generated.intent_rationale,
+    )
+    return RunResponse(generated=generated, report=report)
+
+
+@tests.post("/execute", response_model=ReportResponse,
+            summary="주어진 Test Code 실행 + 판정 (codetest test)")
+def execute_tests(payload: ExecuteRequest) -> ReportResponse:
+    """`/src/test/test.txt` 의 Test Code 를 MCP 로 실행하고 적절성을 판단한다."""
+    return _execute_and_report(
+        payload.project_id,
+        payload.test_code,
+        _payload_sources(payload.sources),
+        payload.base_package,
+        payload.intent,
+        payload.intent_rationale,
+    )
 
 
 router.include_router(projects)
@@ -216,21 +220,23 @@ router.include_router(tests)
 # --- 앱 ----------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """기동 시 런타임 디렉터리 생성 + 테이블 초기화."""
-    settings.ensure_directories()
-    init_db()
-    logger.info("%s 기동 (model=%s)", settings.app_name, settings.llm_model)
+    logger.info(
+        "%s 기동 (model=%s, mcp=%s)",
+        settings.app_name, settings.llm_model, settings.mcp_base_url,
+    )
     yield
     logger.info("%s 종료", settings.app_name)
 
 
 app = FastAPI(
     title=settings.app_name,
-    description="변경 코드를 AST Graph 위에서 분석해 Test Code 를 생성하는 Agent Server.",
+    description=(
+        "LLM 판단 전담 Agent. 변경 의도 파악·사고의 사슬·@SpringBootTest 생성·"
+        "결과 적절성 판단을 담당하며, 코드 기반 처리는 MCP 서비스에 위임한다."
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )
-# 수정: include_router 는 호출 시점의 라우트를 복사하므로 반드시 라우터 정의 뒤에 온다.
 app.include_router(router)
 
 

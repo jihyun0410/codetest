@@ -1,29 +1,21 @@
 [project]
-name = "codetest-agent-server"
+name = "codetest-agent"
 version = "0.1.0"
-description = "Code Test AI Agent - Agent Server (별도 관리 서버 배포용)"
+description = "Code Test AI Agent - Agent (LLM 판단 전담, 코드 기반 처리는 MCP 에 위임)"
 requires-python = ">=3.10"
 
 dependencies = [
-    # --- REST API ---
+    # --- REST API (Local Client 수신) ---
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
 
-    # --- DB (Project, Graph Node/Edge, Workflow) ---
-    "SQLAlchemy>=2.0",
-
-    # --- 저장소 clone ---
-    "GitPython>=3.1",
+    # --- MCP 서비스 호출 (FastAPI 로 송/수신) ---
+    "httpx>=0.27",
 
     # --- LLM ---
     "anthropic>=0.40",
-
-    # --- AST 파싱 (LLM 토큰 미소모) ---
-    "tree-sitter>=0.22",
-    "tree-sitter-language-pack>=0.2",  # Java/JS/TS/Python/XML/SQL 문법 번들
-    "lxml>=5.2",                       # MyBatis XML 파싱
 ]
 
 [project.optional-dependencies]
