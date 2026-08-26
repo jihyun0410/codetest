@@ -4,7 +4,7 @@ Agent 는 정의서의 "LLM을 사용하여 판단하는 부분" 만 담당한�
 코드 기반 처리(AST/개요/실행)는 MCP 서비스에 FastAPI 로 위임하므로
 DB/작업 디렉터리 설정이 없고 대신 MCP 접속 설정을 갖는다.
 
-비밀값(ANTHROPIC_API_KEY, API Key)은 코드에 두지 않고 .env / OS 환경변수로만 주입한다.
+비밀값(OPENAI_API_KEY, API Key)은 코드에 두지 않고 .env / OS 환경변수로만 주입한다.
 """
 
 from __future__ import annotations
@@ -46,9 +46,10 @@ class Settings(BaseSettings):
         default=960.0, alias="CODETEST_MCP_EXECUTE_TIMEOUT"
     )
 
-    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
-    llm_model: str = Field(default="claude-opus-5", alias="CODETEST_LLM_MODEL")
-    #: 사고 깊이/토큰 지출 제어. low | medium | high | xhigh | max
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    llm_model: str = Field(default="gpt-5", alias="CODETEST_LLM_MODEL")
+    #: 추론 강도/토큰 지출 제어. minimal | low | medium | high
+    #: (추론 모델이 아니면 llm.py 가 이 값을 빼고 재시도한다)
     llm_effort: str = Field(default="high", alias="CODETEST_LLM_EFFORT")
     llm_max_tokens: int = Field(default=32000, alias="CODETEST_LLM_MAX_TOKENS")
 

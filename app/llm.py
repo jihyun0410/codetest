@@ -1,8 +1,7 @@
-"""Anthropic Claude 호출 + 응답 섹션 파서.
+"""OpenAI 호출 + 응답 섹션 파서.
 
-- 모델: Claude Opus 5, 적응형 사고(adaptive thinking) + effort 로 지출 제어
-- 긴 응답의 HTTP 타임아웃을 피하려고 항상 **스트리밍**으로 호출한다
-- 안전 분류기 거부(`stop_reason == "refusal"`)는 content 접근 **전에** 확인한다
+- 모델 / 추론 강도 / 토큰 상한은 전부 .env 로 주입한다 (app.config.Settings).
+- 안전 거부는 message.refusal 과 finish_reason == "content_filter" 둘 다에서 확인한다.
 """
 
 from __future__ import annotations
@@ -13,9 +12,6 @@ from dataclasses import dataclass, field
 from app.config import get_logger, settings
 
 logger = get_logger(__name__)
-
-#: 서버 사이드 fallback("default" 스칼라)을 여는 베타 플래그
-_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 #: "## IMPORTANCE" 같은 2단계 헤딩
 _SECTION_HEADING = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
@@ -46,25 +42,25 @@ class LLMResponse:
 
 
 class LLMClient:
-    """프로세스 전역에서 재사용하는 Claude 클라이언트."""
+    """프로세스 전역에서 재사용하는 OpenAI 클라이언트."""
 
     def __init__(self) -> None:
         self._client = None
 
     def _ensure_client(self):
-        """지연 초기화. API Key 가 없어도 SDK 표준 자격증명 경로가 동작할 수 있다."""
+        """지연 초기화. 키가 없으면 SDK 가 OPENAI_API_KEY 환경변수를 스스로 찾는다."""
         if self._client is not None:
             return self._client
         try:
-            import anthropic
+            import openai
         except ImportError as exc:  # pragma: no cover
-            raise LLMUnavailableError("anthropic SDK 가 설치되어 있지 않습니다.") from exc
+            raise LLMUnavailableError("openai SDK 가 설치되어 있지 않습니다.") from exc
 
-        kwargs = {"api_key": settings.anthropic_api_key} if settings.anthropic_api_key else {}
+        kwargs = {"api_key": settings.openai_api_key} if settings.openai_api_key else {}
         try:
-            self._client = anthropic.Anthropic(**kwargs)
+            self._client = openai.OpenAI(**kwargs)
         except Exception as exc:
-            raise LLMUnavailableError(f"Anthropic 클라이언트 생성 실패: {exc}") from exc
+            raise LLMUnavailableError(f"OpenAI 클라이언트 생성 실패: {exc}") from exc
         return self._client
 
     @property
@@ -79,78 +75,52 @@ class LLMClient:
         """
         생성 1건.
 
-        :raises LLMUnavailableError: 클라이언트를 만들 수 없을 때
+        :raises LLMUnavailableError: 클라이언트를 만들 수 없거나 호출이 실패했을 때
         :raises LLMRefusalError:     안전 분류기가 거부했을 때
         """
         client = self._ensure_client()
 
-        # 시스템 프롬프트는 요청마다 동일하므로 프롬프트 캐시를 건다.
-        kwargs = {
+        # ponytail: 비스트리밍. max_completion_tokens 를 크게 잡으면 응답이 길어지므로
+        #           타임아웃이 실제로 문제되면 그때 stream=True 로 바꾼다.
+        completion = self._create(client, {
             "model": settings.llm_model,
-            "max_tokens": settings.llm_max_tokens,
-            "system": [
-                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            "max_completion_tokens": settings.llm_max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
-            "messages": [{"role": "user", "content": user}],
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": settings.llm_effort},
-        }
-        message = self._stream_with_fallback(client, kwargs)
+            "reasoning_effort": settings.llm_effort,
+        })
 
-        # content 를 읽기 전에 반드시 stop_reason 을 확인한다.
-        if message.stop_reason == "refusal":
-            details = getattr(message, "stop_details", None)
-            raise LLMRefusalError(
-                getattr(details, "category", None), getattr(details, "explanation", None)
-            )
+        choice = completion.choices[0]
+        # 본문을 읽기 전에 거부 여부를 먼저 확인한다.
+        refusal = getattr(choice.message, "refusal", None)
+        if refusal or choice.finish_reason == "content_filter":
+            raise LLMRefusalError("content_filter", refusal or "안전 필터에 의해 차단되었습니다.")
 
-        text = "".join(
-            block.text for block in message.content if getattr(block, "type", "") == "text"
-        )
-        usage = message.usage
+        usage = completion.usage
+        details = getattr(usage, "prompt_tokens_details", None)
         return LLMResponse(
-            text=text.strip(),
-            model=getattr(message, "model", settings.llm_model),
-            input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_tokens=getattr(usage, "output_tokens", 0) or 0,
-            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
-            stop_reason=message.stop_reason,
+            text=(choice.message.content or "").strip(),
+            model=getattr(completion, "model", None) or settings.llm_model,
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            cache_read_tokens=getattr(details, "cached_tokens", 0) or 0,
+            stop_reason=choice.finish_reason,
             meta={"effort": settings.llm_effort},
         )
 
-    def _stream_with_fallback(self, client, kwargs: dict):
-        """
-        단계적으로 낮춰 가며 스트리밍 호출한다.
-
-          1) 베타 엔드포인트 + 서버 사이드 fallback → 거부 시 다른 모델이 이어받음
-          2) 일반 엔드포인트
-          3) SDK 가 output_config / thinking 을 모르면 제거 후 재시도
-        """
+    def _create(self, client, kwargs: dict):
+        """reasoning_effort 는 추론 모델 전용 — 거부당하면 빼고 한 번만 재시도한다."""
         try:
-            with client.beta.messages.stream(
-                **kwargs, betas=[_FALLBACK_BETA], fallbacks="default"
-            ) as stream:
-                return stream.get_final_message()
-        except LLMRefusalError:
-            raise
+            return client.chat.completions.create(**kwargs)
         except Exception as exc:
-            logger.info("서버 사이드 fallback 미사용(%s) — 일반 경로로 재시도", exc)
-
-        attempts = [
-            dict(kwargs),
-            {k: v for k, v in kwargs.items() if k != "output_config"},
-            {k: v for k, v in kwargs.items() if k not in {"output_config", "thinking"}},
-        ]
-        last_error: Exception | None = None
-        for index, attempt in enumerate(attempts, start=1):
-            try:
-                with client.messages.stream(**attempt) as stream:
-                    return stream.get_final_message()
-            except TypeError as exc:
-                last_error = exc
-                logger.warning("SDK 미지원 파라미터 — 축소 후 재시도(%d/%d): %s",
-                               index, len(attempts), exc)
-        raise LLMUnavailableError(f"Claude 호출에 실패했습니다: {last_error}")
+            if "reasoning_effort" not in kwargs:
+                raise LLMUnavailableError(f"OpenAI 호출에 실패했습니다: {exc}") from None
+            logger.info("reasoning_effort 미지원으로 보임(%s) — 제거 후 재시도", exc)
+            return self._create(
+                client, {k: v for k, v in kwargs.items() if k != "reasoning_effort"}
+            )
 
 
 #: 애플리케이션 전역 싱글턴
