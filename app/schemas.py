@@ -52,8 +52,6 @@ class GenerateRequest(BaseModel):
     diff: str
     #: 변경 파일 본문 (테스트 대상 코드)
     sources: list[SourceFilePayload] = Field(default_factory=list)
-    #: staged / unstaged / worktree — 어떤 범위인지 표기용
-    scope: str = "worktree"
 
 
 class GenerateResponse(BaseModel):

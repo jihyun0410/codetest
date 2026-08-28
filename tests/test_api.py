@@ -96,7 +96,6 @@ GENERATE_BODY = {
     "project_id": "p1",
     "diff": "--- a/A.java\n+++ b/A.java\n@@ -1,2 +1,2 @@\n-old\n+new\n",
     "sources": [{"path": "A.java", "content": "class A {}"}],
-    "scope": "staged",
 }
 
 

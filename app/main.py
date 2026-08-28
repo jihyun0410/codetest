@@ -98,7 +98,6 @@ def _generate(payload: GenerateRequest, analysis: dict) -> GenerateResponse:
         return testgen.generate(
             analysis,
             sources=[(item.path, item.content) for item in payload.sources],
-            scope=payload.scope,
             project_name=overview.get("name", payload.project_id),
         )
 

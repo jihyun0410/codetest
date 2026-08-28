@@ -110,21 +110,20 @@ _REPORT_SYSTEM = """당신은 Spring Boot 프로젝트를 담당하는 시니어
 #  생성 (정의서 (2) 의도 파악 + (3) 테스트 생성 + [상세] 2·3 CoT)
 # ---------------------------------------------------------------------------
 def generate(
-    analysis: dict, sources: list[tuple[str, str]], scope: str, project_name: str
+    analysis: dict, sources: list[tuple[str, str]], project_name: str
 ) -> GenerateResponse:
     """
     MCP 가 식별한 변경 사실 + 프로젝트 개요를 근거로 Test Code 를 생성한다.
 
     :param analysis: MCP `/analysis/changes` 응답 (변경 단위·영향도·개요)
     :param sources:  변경 파일 [(경로, 본문)]
-    :param scope:    staged / unstaged / worktree
     """
     prior_importance = _RISK_TO_IMPORTANCE.get(analysis.get("risk", "LOW"), "LOW")
     prior_reason = " / ".join(analysis.get("risk_reasons") or [])
     target_code = "\n\n".join(f"### {path}\n```java\n{body}\n```" for path, body in sources)
 
     user_prompt = "\n\n".join([
-        _project_section(analysis, project_name, scope),
+        _project_section(analysis, project_name),
         _changed_units_section(analysis),
         _impact_section(analysis),
         f"# 변경 Diff\n```diff\n{_clip(_diff_of(analysis), 20000)}\n```",
@@ -200,11 +199,11 @@ def report(
 # ---------------------------------------------------------------------------
 #  프롬프트 조립 — MCP 가 준 사실을 근거로 넣는다
 # ---------------------------------------------------------------------------
-def _project_section(analysis: dict, project_name: str, scope: str) -> str:
+def _project_section(analysis: dict, project_name: str) -> str:
     frameworks = ", ".join(analysis.get("frameworks") or []) or "-"
     lines = [
         "# 프로젝트 개요 (MCP 가 AST 로 수집)",
-        f"- 이름: {project_name} (변경 범위: {scope})",
+        f"- 이름: {project_name}",
         f"- 프레임워크: {frameworks}",
         f"- 기준 패키지: {analysis.get('base_package') or '-'}",
     ]
