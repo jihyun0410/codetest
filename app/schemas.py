@@ -1,10 +1,17 @@
-"""Agent REST 요청/응답 스키마 (Local Client 의 api_client.py 와 1:1 대응)."""
+"""Agent REST 요청/응답 스키마.
+
+MCP(codetest-MCP)의 `agent_client.py` 가 보내는 본문과 1:1 로 대응한다.
+
+Agent 는 **LLM 판단만** 한다. 변경 단위·영향도·기능 중요도·실행 결과는 MCP 가
+코드로 확정해 본문에 실어 보내므로 여기서 다시 계산하지 않는다.
+
+  POST /api/v1/tests/generate   MCP 가 준 분석 사실 → 의도·사고의 사슬·Test Code
+  POST /api/v1/tests/execute    MCP 가 준 실행 결과 → 적절성 판단
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class SourceFilePayload(BaseModel):
@@ -13,89 +20,66 @@ class SourceFilePayload(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-#  POST /projects — MCP 로 위임 (개요 수집은 코드 기반 작업)
-# ---------------------------------------------------------------------------
-class ProjectCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200, description="프로젝트 명")
-    git_url: str = Field(..., description="대상 저장소 Git URL")
-    owner: str = Field(..., min_length=1, max_length=100, description="담당자")
-    github_token: str | None = Field(default=None, description="Github API Token")
-    default_branch: str = Field(default="main", description="기준 브랜치")
-
-
-class ProjectRead(BaseModel):
-    """MCP 응답을 그대로 전달한다."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    name: str
-    git_url: str
-    owner: str
-    default_branch: str
-    ingest_status: str
-    ingest_error: str | None = None
-    last_indexed_at: datetime | None = None
-    frameworks: list[str] = Field(default_factory=list)
-    language_stats: dict = Field(default_factory=dict)
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-    has_github_token: bool = False
-
-
-# ---------------------------------------------------------------------------
 #  Test Code 생성 — 정의서 (2) 의도 파악 + (3) 생성 + [상세] 2·3 CoT
 # ---------------------------------------------------------------------------
 class GenerateRequest(BaseModel):
+    """MCP 가 `POST /api/v1/tests/generate` 로 보내는 본문."""
+
     project_id: str
-    #: 변경분 unified diff
-    diff: str
+    #: 프롬프트에 넣을 프로젝트 이름
+    project_name: str = ""
+    #: MCP `analyze_changes` 응답 전문 — 변경 단위·영향도·개요
+    #: (키: changed_units / impacted_units / risk / risk_reasons / frameworks /
+    #:  base_package / changed_ranges / graph_ready / warnings / diff)
+    analysis: dict = Field(default_factory=dict)
     #: 변경 파일 본문 (테스트 대상 코드)
     sources: list[SourceFilePayload] = Field(default_factory=list)
 
 
 class GenerateResponse(BaseModel):
+    """LLM 판단만 담는다. 기능 중요도는 MCP 가 코드 그래프로 확정하므로 여기 없다."""
+
     #: [상세 2] 사고의 사슬 — 생각하는 과정 (Test Code 작성 근거의 일부)
     thinking: str = ""
     #: (2) 파악한 변경 의도 — 기능 추가 / 조건 변경 / 성능 개선 …
     intent: str = ""
     intent_rationale: str = ""
-    #: [UI 4] 기능 중요도 — HIGH / MID / LOW
-    importance: str = "LOW"
-    importance_rationale: str = ""
     #: (3) 정상 케이스 / 실패 케이스 판단 결과
     test_cases: str = ""
     #: @SpringBootTest 테스트 코드
     test_code: str = ""
     rationale: str = ""
-    #: 테스트 대상 코드 (TUI "Test Code 보기")
+    #: 테스트 대상 코드 (CLI "Test Code 보기")
     target_code: str = ""
-    #: MCP 가 추론한 기준 패키지 — 실행 시 그대로 넘긴다
+    #: MCP 가 준 기준 패키지를 그대로 되돌려 준다 (MCP 가 실행에 쓴다)
     base_package: str | None = None
-    #: MCP 개요 수집 완료 여부 / 경고
-    graph_ready: bool = True
-    analysis_warnings: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
-#  테스트 실행 + 판정 — 정의서 (1) 실행, [상세 4] JaCoCo, [UI 3] 적절성
+#  적절성 판단 — 정의서 [UI] 3 + (2) 의도를 결과값에 포함
 # ---------------------------------------------------------------------------
 class ExecuteRequest(BaseModel):
-    """`codetest test` — src/test/test.txt 의 Test Code 를 실행한다."""
+    """MCP 가 `POST /api/v1/tests/execute` 로 보내는 본문.
+
+    MCP 가 이미 @SpringBootTest 를 주입해 Gradle 을 돌렸다.
+    Agent 는 그 결과가 적절한지만 판단한다.
+    """
 
     project_id: str
-    test_code: str
-    #: 실행 전 작업 사본에 덮어쓸 변경 파일
-    sources: list[SourceFilePayload] = Field(default_factory=list)
-    base_package: str | None = None
-    #: 이전에 생성했을 때 파악한 의도 (결과값에 함께 표시하기 위함)
+    #: MCP `execute_tests` 실행 결과 전문
+    #: (키: exit_code / passed / failed / skipped / total / failures / coverage /
+    #:  jacoco_enabled / springboot_applied / applied / test_file_path / output)
+    execution: dict = Field(default_factory=dict)
+    #: 실행한 Test Code
+    test_code: str = ""
+    #: MCP 가 앞서 받아 둔 변경 의도 (결과값에 함께 표시하기 위함)
     intent: str = ""
     intent_rationale: str = ""
 
 
 class ReportResponse(BaseModel):
-    #: PASS / FAIL (gradle exit code 가 사실)
-    result: str = "FAIL"
+    """LLM 판단만 담는다. 실행 집계·커버리지는 MCP 가 이미 갖고 있다."""
+
     #: [UI 3] 결과가 적절한지 (적절 / 부적절)
     verdict: str = ""
     verdict_rationale: str = ""
@@ -104,30 +88,3 @@ class ReportResponse(BaseModel):
     #: (2) "파악한 의도와 근거를 <Test Result 보기>의 결과값에 넣는다"
     intent: str = ""
     intent_rationale: str = ""
-
-    # --- MCP 가 확정한 실행 사실 ---
-    passed: int = 0
-    failed: int = 0
-    skipped: int = 0
-    total: int = 0
-    failures: list[str] = Field(default_factory=list)
-    #: [상세 4] JaCoCo 커버리지
-    coverage: dict | None = None
-    jacoco_enabled: bool = False
-    #: (1) "생성된 Test Code를 @SpringBootTest 에 넣고 실행"
-    springboot_applied: bool = False
-    applied: list[str] = Field(default_factory=list)
-    test_file_path: str = ""
-    exit_code: int = 0
-    output: str = ""
-
-
-class RunRequest(GenerateRequest):
-    """`codetest run` / `run --stage` — 생성 + 실행 + 판정을 한 번에."""
-
-
-class RunResponse(BaseModel):
-    """생성 결과와 판정 결과를 함께 돌려준다."""
-
-    generated: GenerateResponse
-    report: ReportResponse

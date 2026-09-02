@@ -21,9 +21,6 @@ import re
 from app.llm import llm_client, split_sections
 from app.schemas import GenerateResponse, ReportResponse
 
-#: MCP 영향도 등급 → 기능 중요도 표기 (정의서 UI (4))
-_RISK_TO_IMPORTANCE = {"HIGH": "HIGH", "MEDIUM": "MID", "LOW": "LOW"}
-
 #: 정의서가 예시로 든 의도 분류
 _INTENT_KINDS = ("기능 추가", "조건 변경", "성능 개선", "버그 수정", "리팩터링")
 
@@ -64,12 +61,6 @@ THINKING 에는 다음을 순서대로 적습니다.
 
 ## INTENT_RATIONALE
 - 의도를 그렇게 판단한 근거 (한 줄에 하나, 변경된 코드를 인용)
-
-## IMPORTANCE
-HIGH | MID | LOW 중 하나
-
-## IMPORTANCE_RATIONALE
-- 중요도 판단 근거 (한 줄에 하나)
 
 ## TEST_CASES
 - [정상] 케이스 설명
@@ -118,8 +109,6 @@ def generate(
     :param analysis: MCP `/analysis/changes` 응답 (변경 단위·영향도·개요)
     :param sources:  변경 파일 [(경로, 본문)]
     """
-    prior_importance = _RISK_TO_IMPORTANCE.get(analysis.get("risk", "LOW"), "LOW")
-    prior_reason = " / ".join(analysis.get("risk_reasons") or [])
     target_code = "\n\n".join(f"### {path}\n```java\n{body}\n```" for path, body in sources)
 
     user_prompt = "\n\n".join([
@@ -137,15 +126,11 @@ def generate(
         thinking=(sections.get("THINKING") or "").strip(),
         intent=_normalize_intent(sections.get("INTENT")),
         intent_rationale=(sections.get("INTENT_RATIONALE") or "").strip(),
-        importance=_normalize_importance(sections.get("IMPORTANCE"), prior_importance),
-        importance_rationale=(sections.get("IMPORTANCE_RATIONALE") or prior_reason).strip(),
         test_cases=(sections.get("TEST_CASES") or "").strip(),
         test_code=_extract_code(sections.get("TEST_CODE") or ""),
         rationale=(sections.get("TEST_RATIONALE") or "").strip(),
         target_code=target_code,
         base_package=analysis.get("base_package"),
-        graph_ready=bool(analysis.get("graph_ready", True)),
-        analysis_warnings=list(analysis.get("warnings") or []),
     )
 
 
@@ -159,12 +144,12 @@ def report(
     intent_rationale: str = "",
 ) -> ReportResponse:
     """
-    MCP 실행 결과를 받아 적절성을 판단한다.
+    MCP 가 돌린 @SpringBootTest 결과를 받아 적절성만 판단한다.
 
+    실행 집계·커버리지는 MCP 가 이미 갖고 있으므로 되돌려 보내지 않는다.
     정의서 (2): "파악한 의도와 근거에 대한 내용을 <Test Result 보기>의 결과값에 넣는다"
     → 판정 응답에 intent / intent_rationale 을 그대로 실어 보낸다.
     """
-    exit_code = int(execution.get("exit_code", 1))
     user_prompt = "\n\n".join([
         f"# 파악한 변경 의도\n{intent or '-'}\n근거:\n{intent_rationale or '-'}",
         f"# 실행한 테스트 코드\n```java\n{_clip(test_code, 20000)}\n```",
@@ -174,25 +159,11 @@ def report(
     sections = split_sections(llm_client.complete(_REPORT_SYSTEM, user_prompt).text)
 
     return ReportResponse(
-        # exit code 와 JUnit 집계는 사실이므로 LLM 판정보다 우선한다.
-        result="PASS" if exit_code == 0 else "FAIL",
         verdict=_first_line(sections.get("VERDICT")),
         verdict_rationale=(sections.get("VERDICT_RATIONALE") or "").strip(),
         details=(sections.get("DETAILS") or "").strip(),
         intent=intent,
         intent_rationale=intent_rationale,
-        passed=int(execution.get("passed", 0)),
-        failed=int(execution.get("failed", 0)),
-        skipped=int(execution.get("skipped", 0)),
-        total=int(execution.get("total", 0)),
-        failures=list(execution.get("failures") or []),
-        coverage=execution.get("coverage"),
-        jacoco_enabled=bool(execution.get("jacoco_enabled", False)),
-        springboot_applied=bool(execution.get("springboot_applied", False)),
-        applied=list(execution.get("applied") or []),
-        test_file_path=execution.get("test_file_path") or "",
-        exit_code=exit_code,
-        output=execution.get("output") or "",
     )
 
 
@@ -308,14 +279,6 @@ def _normalize_intent(value: str | None) -> str:
         if kind in text:
             return kind
     return _first_line(text)
-
-
-def _normalize_importance(value: str | None, fallback: str) -> str:
-    text = (value or "").upper()
-    for level in ("HIGH", "MID", "LOW"):
-        if level in text:
-            return level
-    return "MID" if "MEDIUM" in text else fallback
 
 
 def _extract_code(block: str) -> str:

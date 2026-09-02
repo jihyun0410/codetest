@@ -1,8 +1,8 @@
 """Agent 설정 · 로깅 · API Key 인증.
 
 Agent 는 정의서의 "LLM을 사용하여 판단하는 부분" 만 담당한다.
-코드 기반 처리(AST/개요/실행)는 MCP 서비스에 FastAPI 로 위임하므로
-DB/작업 디렉터리 설정이 없고 대신 MCP 접속 설정을 갖는다.
+진입점은 MCP 이고, 코드 기반 처리(AST/개요/중요도/실행)는 MCP 가 끝낸 뒤
+LLM 이 필요한 부분만 FastAPI 로 넘겨준다. 그래서 DB·작업 디렉터리 설정이 없다.
 
 비밀값(OPENAI_API_KEY, API Key)은 코드에 두지 않고 .env / OS 환경변수로만 주입한다.
 """
@@ -28,22 +28,12 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", alias="CODETEST_HOST")
     port: int = Field(default=8000, alias="CODETEST_PORT")
 
-    #: Local Client 인증용 키 목록. X-API-Key 헤더와 대조한다.
+    #: MCP 인증용 키 목록. X-API-Key 헤더와 대조한다.
     #: 비어 있으면 인증 비활성화(로컬 개발 편의).
     #: 수정: NoDecode 가 없으면 pydantic-settings 가 env 값을 JSON 으로 먼저 파싱해
     #:      아래 _split_csv 가 돌기도 전에 SettingsError 로 죽는다.
     api_keys: Annotated[list[str], NoDecode] = Field(
         default_factory=list, alias="CODETEST_API_KEYS"
-    )
-
-    # --- MCP 서비스 (코드 기반 처리 위임 대상) ---
-    #: 정의서: "Fast API를 통해 송/수신하는 방식으로 구현"
-    mcp_base_url: str = Field(default="http://localhost:8100", alias="CODETEST_MCP_BASE_URL")
-    mcp_api_key: str = Field(default="", alias="CODETEST_MCP_API_KEY")
-    mcp_timeout_seconds: float = Field(default=120.0, alias="CODETEST_MCP_TIMEOUT")
-    #: Gradle 빌드 + Spring 컨텍스트 기동은 오래 걸린다
-    mcp_execute_timeout_seconds: float = Field(
-        default=960.0, alias="CODETEST_MCP_EXECUTE_TIMEOUT"
     )
 
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
