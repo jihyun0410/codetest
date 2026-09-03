@@ -19,7 +19,8 @@ MCP 가 호출하는 엔드포인트:
   POST /api/v1/tests/execute     실행 결과 적절성 판단
 
 **기능 중요도는 여기서 판단하지 않는다.** 코드 그래프로 확정하는 값이라 MCP 의 몫이다
-(codetest-MCP `importance.py`).
+(codetest-MCP `codetest_mcp/importance.py`). 중요도와 그 판단 근거는 MCP 가 결과에
+실어 CLI 화면까지 그대로 전달한다.
 """
 
 from __future__ import annotations

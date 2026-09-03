@@ -7,11 +7,11 @@ LLM 판단 전담 계층 (Agent).
   · (3) "여러 파일이 수정된 경우 변경된 비즈니스 흐름 전체를 묶어 하나의 테스트로"
   · [상세 2] "사고의 사슬 유도 기술을 사용하여 생각하는 과정을 먼저 적는다"
   · [상세 3] "적어둔 생각 과정과 프로젝트 개요를 사용하여 Test Code 생성"
-  · [UI 4] 기능 중요도 High / Mid / Low
   · [UI 3] 결과의 적절성 여부 판단과 근거
 
-코드로 확정되는 사실(변경 단위, 영향도, 실행 결과)은 MCP 가 만들어 준 것을
-프롬프트 입력으로 쓸 뿐, 여기서 다시 계산하지 않는다.
+코드로 확정되는 사실(변경 단위, 영향도, 기능 중요도, 실행 결과)은 MCP 가 만들어 준
+것을 프롬프트 입력으로 쓸 뿐, 여기서 다시 계산하지 않는다.
+[UI 4] 기능 중요도는 그래프로 확정하는 값이라 MCP `importance.py` 가 판정한다.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def generate(
     """
     MCP 가 식별한 변경 사실 + 프로젝트 개요를 근거로 Test Code 를 생성한다.
 
-    :param analysis: MCP `/analysis/changes` 응답 (변경 단위·영향도·개요)
+    :param analysis: MCP 가 확정한 변경 분석 (변경 단위·영향도·개요·원본 Diff)
     :param sources:  변경 파일 [(경로, 본문)]
     """
     target_code = "\n\n".join(f"### {path}\n```java\n{body}\n```" for path, body in sources)
