@@ -1,6 +1,7 @@
 """Agent REST 요청/응답 스키마.
 
 MCP(codetest-MCP)의 `agent_client.py` 가 보내는 본문과 1:1 로 대응한다.
+흐름은 CLI → MCP → Agent 다 — 이 서버를 부르는 쪽은 언제나 MCP 다.
 
 Agent 는 **LLM 판단만** 한다. 변경 단위·영향도·기능 중요도·실행 결과는 MCP 가
 코드로 확정해 본문에 실어 보내므로 여기서 다시 계산하지 않는다.
@@ -28,7 +29,7 @@ class GenerateRequest(BaseModel):
     project_id: str
     #: 프롬프트에 넣을 프로젝트 이름
     project_name: str = ""
-    #: MCP `analyze_changes` 응답 전문 — 변경 단위·영향도·개요
+    #: MCP 가 Git Diff + AST 로 확정한 변경 분석 전문 (MCP 내부 단계 `_analyze`)
     #: (키: changed_units / impacted_units / risk / risk_reasons / frameworks /
     #:  base_package / changed_ranges / graph_ready / warnings / diff)
     analysis: dict = Field(default_factory=dict)
