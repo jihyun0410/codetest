@@ -11,9 +11,6 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
 
-    # --- MCP 서비스 호출 (FastAPI 로 송/수신) ---
-    "httpx>=0.27",
-
     # --- LLM ---
     "openai>=1.60",
 ]

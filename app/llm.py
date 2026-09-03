@@ -56,11 +56,18 @@ class LLMClient:
         except ImportError as exc:  # pragma: no cover
             raise LLMUnavailableError("openai SDK 가 설치되어 있지 않습니다.") from exc
 
-        kwargs = {"api_key": settings.openai_api_key} if settings.openai_api_key else {}
+        kwargs: dict = {}
+        if settings.openai_api_key:
+            kwargs["api_key"] = settings.openai_api_key
+        # 사내 게이트웨이/Azure 등 OpenAI 호환 엔드포인트. 반드시 명시적으로 넘긴다 —
+        # pydantic-settings 는 .env 를 os.environ 에 넣지 않으므로 SDK 가 스스로 못 읽는다.
+        if settings.openai_base_url:
+            kwargs["base_url"] = settings.openai_base_url
         try:
             self._client = openai.OpenAI(**kwargs)
         except Exception as exc:
             raise LLMUnavailableError(f"OpenAI 클라이언트 생성 실패: {exc}") from exc
+        logger.info("LLM 엔드포인트 = %s (model=%s)", self._client.base_url, settings.llm_model)
         return self._client
 
     @property
@@ -111,16 +118,56 @@ class LLMClient:
         )
 
     def _create(self, client, kwargs: dict):
-        """reasoning_effort 는 추론 모델 전용 — 거부당하면 빼고 한 번만 재시도한다."""
+        """호출 1건. 실패하면 **무엇을 고쳐야 하는지** 구분해서 알린다.
+
+        연결 오류와 키/모델 오류는 원인도 조치도 전혀 다르다. 예전에는 어떤 예외든
+        reasoning_effort 탓으로 보고 재시도해, 연결이 막힌 경우에도 두 번 호출한 뒤
+        "OpenAI 호출에 실패했습니다: Connection error" 만 남겼다.
+        """
+        import openai
+
         try:
             return client.chat.completions.create(**kwargs)
+
+        except openai.BadRequestError as exc:
+            # reasoning_effort 는 추론 모델 전용 — 그것 때문에 거부당했을 때만 빼고 재시도한다.
+            if "reasoning_effort" in kwargs and "reasoning_effort" in str(exc):
+                logger.info(
+                    "%s 가 reasoning_effort 를 받지 않음 — 제거 후 재시도", settings.llm_model
+                )
+                return self._create(
+                    client, {k: v for k, v in kwargs.items() if k != "reasoning_effort"}
+                )
+            raise LLMUnavailableError(f"OpenAI 가 요청을 거부했습니다 (400): {exc}") from None
+
+        except openai.APIConnectionError as exc:
+            # 요청이 서버에 닿지도 못한 경우. 키/모델이 틀렸다면 401/404 로 온다.
+            raise LLMUnavailableError(
+                f"OpenAI 에 연결하지 못했습니다: {exc}\n"
+                f"  · 요청 주소: {client.base_url}\n"
+                f"  · 사내망이면 OPENAI_BASE_URL 로 게이트웨이 주소를 지정하세요.\n"
+                f"  · 프록시가 필요하면 HTTPS_PROXY 를 설정하세요.\n"
+                f"  · 키나 모델이 틀린 경우라면 이 오류가 아니라 401/404 가 옵니다."
+            ) from None
+
+        except openai.AuthenticationError as exc:
+            raise LLMUnavailableError(
+                f"인증에 실패했습니다 (401) — OPENAI_API_KEY 를 확인하세요.\n"
+                f"  · 요청 주소: {client.base_url}\n"
+                f"  · 사내 게이트웨이(LiteLLM 등)라면 그 게이트웨이가 발급한 키여야 합니다.\n"
+                f"    OpenAI 원본 키를 넣으면 프록시가 자기 DB 에서 못 찾아 401 을 돌려줍니다.\n"
+                f"  · OS 환경변수가 .env 보다 우선합니다 — 예전 키가 export 되어 있는지 확인하세요.\n"
+                f"  ({exc})"
+            ) from None
+
+        except openai.NotFoundError as exc:
+            raise LLMUnavailableError(
+                f"모델을 찾지 못했습니다 (404) — CODETEST_LLM_MODEL={settings.llm_model} 과 "
+                f"요청 주소({client.base_url})를 확인하세요: {exc}"
+            ) from None
+
         except Exception as exc:
-            if "reasoning_effort" not in kwargs:
-                raise LLMUnavailableError(f"OpenAI 호출에 실패했습니다: {exc}") from None
-            logger.info("reasoning_effort 미지원으로 보임(%s) — 제거 후 재시도", exc)
-            return self._create(
-                client, {k: v for k, v in kwargs.items() if k != "reasoning_effort"}
-            )
+            raise LLMUnavailableError(f"OpenAI 호출에 실패했습니다: {exc}") from None
 
 
 #: 애플리케이션 전역 싱글턴

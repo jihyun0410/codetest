@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     )
 
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    #: LLM 접속 주소. 사내 게이트웨이·프록시·Azure 등 OpenAI 호환 엔드포인트를 쓸 때 지정한다.
+    #: 비우면 SDK 기본값(https://api.openai.com/v1).
+    openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
     llm_model: str = Field(default="gpt-5", alias="CODETEST_LLM_MODEL")
     #: 추론 강도/토큰 지출 제어. minimal | low | medium | high
     #: (추론 모델이 아니면 llm.py 가 이 값을 빼고 재시도한다)
