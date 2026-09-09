@@ -86,8 +86,43 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `OPENAI_API_KEY` | (없음) | LLM API 키 |
 | `OPENAI_BASE_URL` | (없음) | OpenAI 호환 엔드포인트. 비우면 공식 주소 |
 | `CODETEST_LLM_MODEL` | `gpt-5` | 사용할 모델 |
-| `CODETEST_LLM_EFFORT` | `high` | 추론 강도 (minimal/low/medium/high) |
+| `CODETEST_LLM_EFFORT` | `medium` | 추론 강도 (minimal/low/medium/high). 아래 "생성 시간" 참고 |
 | `CODETEST_LLM_MAX_TOKENS` | `32000` | 출력 토큰 상한 |
+| `CODETEST_LLM_PING_SECONDS` | `10` | 생성 중 keep-alive 간격(초) |
+
+## 생성 시간 — 504 Gateway Time-out 을 만드는 것
+
+앞단 리버스 프록시(nginx)의 `proxy_read_timeout` 은 **총 소요 시간이 아니라 무응답
+시간**이다. 기본값 60초 동안 upstream 에서 한 바이트도 안 오면 504 를 만든다.
+예전에는 이 서버가 LLM 을 다 기다린 뒤에야 JSON 을 한 덩어리로 내보냈으므로,
+생성이 3분 걸리면 3분 내내 조용했다 — 프록시 입장에서는 죽은 연결이다.
+
+두 갈래로 고쳤다.
+
+**1. 기다리는 동안 한 줄씩 흘려보낸다.** `Accept: application/x-ndjson` 이면
+생성이 끝날 때까지 `{"type":"ping"}` 을 `CODETEST_LLM_PING_SECONDS` 간격으로 보내고,
+마지막에 `{"type":"result","data":{…}}` 한 줄을 보낸다. 받는 쪽(MCP `agent_client`)은
+ping 을 버리고 마지막 줄만 쓴다. Accept 를 안 보내면 예전처럼 JSON 한 덩어리로 답한다.
+
+측정값 (LLM 이 25초 걸리는 스텁):
+
+| | 총 소요 | 바이트 사이 최대 침묵 |
+|---|---|---|
+| 예전 (`application/json`) | 25.1s | **25.1s** — 생성 시간만큼 그대로 침묵 |
+| 지금 (`application/x-ndjson`) | 25.1s | **10.1s** — ping 간격에서 멈춘다 |
+
+침묵이 ping 간격에 고정되므로 **생성이 몇 분이 걸리든 504 가 나지 않는다.**
+nginx 설정을 건드릴 수 없는 환경을 위한 장치다.
+
+**2. 실제 생성 시간 자체를 줄인다.** 눈에 보이지 않는 추론 토큰이 응답 시간의
+대부분을 차지한다. 기본 추론 강도를 `high` → `medium` 으로 낮췄다. 이 프롬프트는
+MCP 가 AST 로 확정한 변경 단위·영향 그래프·기준 패키지·실제 구현 본문을 이미 다
+넘겨 주므로 모델이 스스로 알아내야 할 것이 남아 있지 않다 — high 의 추가 숙고는
+테스트 품질보다 대기 시간에 먼저 쓰인다. 되돌리려면 `CODETEST_LLM_EFFORT=high`.
+
+설명 섹션(THINKING/근거)에는 줄 수 상한을 뒀고 **TEST_CODE 에는 두지 않았다.**
+근거 문장이 길어져 봐야 대기 시간만 늘지만, 테스트 코드를 줄이면 import·필드가
+빠져 컴파일이 깨진다.
 
 ## 테스트
 

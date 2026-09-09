@@ -257,3 +257,88 @@ def test_intent_is_normalized_to_one_line():
 def test_code_fence_is_stripped():
     assert testgen._extract_code("```java\nclass A {}\n```") == "class A {}"
     assert testgen._extract_code("class B {}") == "class B {}"
+
+
+# --- 앞단 프록시 대비 keep-alive 스트림 ----------------------------------------
+#
+# nginx 의 proxy_read_timeout 은 총 소요 시간이 아니라 **무응답 시간**이다.
+# LLM 이 생각하는 동안 한 바이트도 안 보내면 504 가 만들어진다. 그래서
+# Accept: application/x-ndjson 이면 ping 을 흘려보내며 기다린다.
+NDJSON = {"Accept": "application/x-ndjson"}
+
+
+def _ndjson_lines(response) -> list[dict]:
+    import json as _json
+
+    return [_json.loads(line) for line in response.text.splitlines() if line.strip()]
+
+
+def test_generate_streams_pings_while_the_llm_thinks(client, monkeypatch):
+    """생성이 오래 걸려도 그 사이 ping 이 나가야 프록시가 504 를 만들지 않는다."""
+    import time
+
+    monkeypatch.setattr(settings, "llm_ping_seconds", 0.05)
+    monkeypatch.setattr(
+        llm_client,
+        "complete",
+        lambda system, user: (time.sleep(0.3), LLMResponse(text=GENERATE_OUTPUT, model="stub"))[1],
+    )
+
+    res = client.post("/api/v1/tests/generate", json=GENERATE_BODY, headers=NDJSON)
+    assert res.status_code == 200
+    lines = _ndjson_lines(res)
+
+    assert any(line["type"] == "ping" for line in lines), "ping 이 하나도 없으면 프록시가 끊는다"
+    assert lines[-1]["type"] == "result"
+    assert "@SpringBootTest" in lines[-1]["data"]["test_code"]
+
+
+def test_stream_reports_llm_failure_in_the_body(client, monkeypatch):
+    """스트림이 시작된 뒤에는 상태 코드를 못 바꾸므로 오류도 본문으로 온다."""
+    def _boom(system, user):
+        raise LLMUnavailableError("키가 없습니다")
+
+    monkeypatch.setattr(llm_client, "complete", _boom)
+    res = client.post("/api/v1/tests/generate", json=GENERATE_BODY, headers=NDJSON)
+
+    assert res.status_code == 200
+    last = _ndjson_lines(res)[-1]
+    assert last == {"type": "error", "status": 503, "detail": "키가 없습니다"}
+
+
+def test_execute_streams_too(client, monkeypatch):
+    _stub_llm(monkeypatch, REPORT_OUTPUT)
+    res = client.post("/api/v1/tests/execute", json=EXECUTE_BODY, headers=NDJSON)
+
+    last = _ndjson_lines(res)[-1]
+    assert last["type"] == "result"
+    assert last["data"]["verdict"] == "적절"
+
+
+def test_plain_json_still_works_for_older_callers(client, monkeypatch):
+    """Accept 를 안 보내는 예전 MCP 는 예전처럼 JSON 한 덩어리를 받는다."""
+    _stub_llm(monkeypatch, GENERATE_OUTPUT)
+    res = client.post("/api/v1/tests/generate", json=GENERATE_BODY)
+
+    assert res.headers["content-type"].startswith("application/json")
+    assert "@SpringBootTest" in res.json()["test_code"]
+
+
+# --- 프롬프트 예산 -------------------------------------------------------------
+def test_oversized_context_drops_whole_files_instead_of_cutting_one():
+    """잘린 파일을 보내면 모델이 없는 API 를 지어낸다 — 통째로 빼고 알린다."""
+    big = "class Big { " + "int x; " * 8000 + "}"
+    section = testgen._target_code_section(
+        [("Changed.java", "class Changed {}"), ("Big.java", big), ("Tail.java", "class Tail {}")]
+    )
+
+    assert "class Changed {}" in section                     # 우선순위 1순위는 남는다
+    assert "int x;" not in section                           # 잘린 조각이 들어가지 않는다
+    assert "생략된 파일" in section and "Big.java" in section  # 뺐다고 알린다
+    assert len(section) < testgen.MAX_TARGET_CHARS + 2000
+
+
+def test_small_context_is_sent_whole():
+    section = testgen._target_code_section([("A.java", "class A {}"), ("B.java", "class B {}")])
+    assert "class A {}" in section and "class B {}" in section
+    assert "생략된 파일" not in section

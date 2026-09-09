@@ -30,12 +30,22 @@ _GENERATE_SYSTEM = """당신은 Spring Boot 프로젝트를 담당하는 시니�
 
 # 반드시 지킬 순서 (사고의 사슬)
 먼저 ## THINKING 에 생각하는 과정을 적습니다. 결론을 먼저 쓰지 마십시오.
-THINKING 에는 다음을 순서대로 적습니다.
+THINKING 에는 다음을 순서대로 **각 한 줄씩** 적습니다.
   1. Diff 에서 무엇이 바뀌었는가 (추가/삭제/조건 변경된 지점)
   2. AST 가 식별한 변경 단위와 영향 범위가 의미하는 것
   3. 이 변경으로 새로 생긴 실행 경로와 경계값
   4. 그래서 무엇을 검증해야 하는가
 그 다음에만 나머지 섹션을 채웁니다.
+
+# 분량 규칙 — 근거는 짧게, 코드는 완전하게
+설명 문장이 길어질수록 정작 실행해야 할 TEST_CODE 가 나오기까지의 대기 시간만
+늘어납니다. 판단 근거는 결론을 되풀이하지 말고 사실만 한 줄로 적습니다.
+  · THINKING          최대 6줄
+  · INTENT_RATIONALE  최대 3줄
+  · TEST_CASES        최대 6줄
+  · TEST_RATIONALE    최대 4줄
+  · TEST_CODE         **분량 제한 없음.** 여기서는 줄이지 마십시오 —
+                      import·필드·검증문을 생략하면 컴파일되지 않습니다.
 
 # 의도 파악
 변경 의도를 다음 중에서 고릅니다: 기능 추가 | 조건 변경 | 성능 개선 | 버그 수정 | 리팩터링
@@ -54,13 +64,13 @@ THINKING 에는 다음을 순서대로 적습니다.
 아래 섹션 구조로만 출력합니다. 다른 문장은 쓰지 않습니다.
 
 ## THINKING
-- 생각하는 과정 (한 줄에 하나)
+- 생각하는 과정 (한 줄에 하나, 최대 6줄)
 
 ## INTENT
 기능 추가 | 조건 변경 | 성능 개선 | 버그 수정 | 리팩터링 중 하나
 
 ## INTENT_RATIONALE
-- 의도를 그렇게 판단한 근거 (한 줄에 하나, 변경된 코드를 인용)
+- 의도를 그렇게 판단한 근거 (한 줄에 하나, 변경된 코드를 인용, 최대 3줄)
 
 ## TEST_CASES
 - [정상] 케이스 설명
@@ -68,11 +78,11 @@ THINKING 에는 다음을 순서대로 적습니다.
 
 ## TEST_CODE
 ```java
-@SpringBootTest 를 사용한 실행 가능한 Java 테스트 클래스 전문
+@SpringBootTest 를 사용한 실행 가능한 Java 테스트 클래스 전문 (생략 없이)
 ```
 
 ## TEST_RATIONALE
-- 이 테스트를 이렇게 작성한 근거 (한 줄에 하나)
+- 이 테스트를 이렇게 작성한 근거 (한 줄에 하나, 최대 4줄)
 """
 
 _REPORT_SYSTEM = """당신은 Spring Boot 프로젝트를 담당하는 시니어 테스트 엔지니어입니다.
@@ -109,14 +119,14 @@ def generate(
     :param analysis: MCP 가 확정한 변경 분석 (변경 단위·영향도·개요·원본 Diff)
     :param sources:  변경 파일 [(경로, 본문)]
     """
-    target_code = "\n\n".join(f"### {path}\n```java\n{body}\n```" for path, body in sources)
+    target_code = _target_code_section(sources)
 
     user_prompt = "\n\n".join([
         _project_section(analysis, project_name),
         _changed_units_section(analysis),
         _impact_section(analysis),
         f"# 변경 Diff\n```diff\n{_clip(_diff_of(analysis), 20000)}\n```",
-        f"# 테스트 대상 코드\n{_clip(target_code, 40000)}",
+        f"# 테스트 대상 코드\n{target_code}",
         "위 변경에 대해 생각하는 과정을 먼저 적고, 그 결과로 @SpringBootTest 테스트를 작성하십시오.",
     ])
 
@@ -262,6 +272,39 @@ def _diff_of(analysis: dict) -> str:
 # ---------------------------------------------------------------------------
 #  응답 정규화
 # ---------------------------------------------------------------------------
+#: 테스트 대상 코드에 쓸 전체 예산(자). 프롬프트 길이는 곧 생성 시간이다.
+#: MCP 가 우선순위대로 골라 보내므로 앞쪽부터 채우면 중요한 파일이 먼저 들어간다.
+MAX_TARGET_CHARS = 45000
+
+
+def _target_code_section(sources: list[tuple[str, str]]) -> str:
+    """테스트 대상 코드를 **파일 단위로** 예산 안에 담는다.
+
+    예전에는 전부 이어 붙인 뒤 4만 자에서 잘랐다. 그러면 경계에 걸린 파일이
+    메서드 중간에서 끊겨 클래스가 닫히지 않은 채로 모델에 들어간다 — 모델은
+    그것을 파일 전체로 믿고 없는 시그니처를 지어내거나 필드를 빠뜨린다.
+    잘린 파일을 보내느니 통째로 빼고 뺐다고 알리는 편이 정확하다.
+    """
+    rendered: list[str] = []
+    used = 0
+    skipped: list[str] = []
+
+    for path, body in sources:
+        block = f"### {path}\n```java\n{body}\n```"
+        if used + len(block) > MAX_TARGET_CHARS and rendered:
+            skipped.append(path)
+            continue
+        rendered.append(block)
+        used += len(block)
+
+    if skipped:
+        rendered.append(
+            "### (예산 초과로 생략된 파일 — 이 파일들의 API 는 추측하지 마십시오)\n"
+            + "\n".join(f"- {path}" for path in skipped)
+        )
+    return "\n\n".join(rendered)
+
+
 def _clip(text: str, limit: int) -> str:
     """토큰 폭주 방지용 단순 절단."""
     return text if len(text) <= limit else text[:limit] + "\n… (이하 생략)"

@@ -25,10 +25,15 @@ MCP 가 호출하는 엔드포인트:
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app import testgen
 from app.config import get_logger, settings, setup_logging, verify_api_key
@@ -65,6 +70,64 @@ def _llm_errors():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
 
 
+# --- 앞단 프록시 대비 keep-alive 스트리밍 ------------------------------------
+#: 한 줄에 JSON 하나. ping 줄은 버리고 마지막 result/error 줄만 쓰면 된다.
+NDJSON_MEDIA_TYPE = "application/x-ndjson"
+
+
+def _wants_ndjson(request: Request) -> bool:
+    """호출자가 keep-alive 스트림을 받겠다고 했는가.
+
+    Accept 로 고르게 해 두면 예전 MCP(일반 JSON 만 아는 쪽)는 그대로 동작한다.
+    """
+    return NDJSON_MEDIA_TYPE in (request.headers.get("accept") or "")
+
+
+def _error_line(exc: Exception) -> dict:
+    """스트림이 시작된 뒤에는 상태 코드를 못 바꾸므로 본문에 실어 보낸다."""
+    if isinstance(exc, LLMUnavailableError):
+        return {"type": "error", "status": 503, "detail": str(exc)}
+    if isinstance(exc, LLMRefusalError):
+        return {"type": "error", "status": 422, "detail": str(exc)}
+    if isinstance(exc, HTTPException):
+        return {"type": "error", "status": exc.status_code, "detail": str(exc.detail)}
+    logger.exception("LLM 처리 중 예외")
+    return {"type": "error", "status": 500, "detail": f"서버 내부 오류가 발생했습니다: {exc}"}
+
+
+async def _ndjson(work: Callable[[], object]) -> AsyncIterator[bytes]:
+    """LLM 이 답할 때까지 ping 을 흘리고, 끝나면 결과 한 줄을 보낸다.
+
+    nginx 의 proxy_read_timeout 은 총 소요 시간이 아니라 **무응답 시간**이다.
+    한 줄이라도 도착하면 타이머가 처음부터 다시 시작하므로, 생성이 몇 분 걸려도
+    프록시 설정을 건드리지 않고 504 를 피할 수 있다.
+    """
+    task = asyncio.create_task(run_in_threadpool(work))
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=settings.llm_ping_seconds)
+        if done:
+            break
+        yield b'{"type":"ping"}\n'
+
+    try:
+        payload = {"type": "result", "data": jsonable_encoder(task.result())}
+    except Exception as exc:  # noqa: BLE001 — 어떤 실패든 스트림 안에서 알려야 한다
+        payload = _error_line(exc)
+    yield (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _streaming(work: Callable[[], object]) -> StreamingResponse:
+    return StreamingResponse(
+        _ndjson(work),
+        media_type=NDJSON_MEDIA_TYPE,
+        headers={
+            # nginx 가 이 응답만 버퍼링하지 않게 한다 — ping 이 즉시 통과해야 한다
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 # --- 라우터 ------------------------------------------------------------------
 router = APIRouter(prefix="/api/v1")
 
@@ -87,41 +150,60 @@ tests = APIRouter(
 
 @tests.post("/generate", response_model=GenerateResponse,
             summary="Test Code 생성 (CLI: codetest generate / run)")
-def generate_tests(payload: GenerateRequest) -> GenerateResponse:
+async def generate_tests(payload: GenerateRequest, request: Request):
     """
     MCP 가 확정한 변경 단위·영향도를 근거로 의도를 파악하고 @SpringBootTest 를 만든다.
 
     코드 기반 작업은 하지 않는다 — 분석은 이미 끝난 상태로 본문에 실려 온다.
+
+    `Accept: application/x-ndjson` 이면 생성이 끝날 때까지 ping 을 흘려보내는
+    스트림으로 답한다 (앞단 프록시의 무응답 타임아웃 회피). 아니면 예전처럼
+    JSON 한 덩어리로 답한다.
     """
     if not payload.analysis:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "analysis 가 비어 있습니다. MCP 의 변경 분석 결과를 함께 보내야 합니다.",
         )
-    with _llm_errors():
+
+    def work() -> GenerateResponse:
         return testgen.generate(
             payload.analysis,
             sources=[(item.path, item.content) for item in payload.sources],
             project_name=payload.project_name or payload.project_id,
         )
 
+    if _wants_ndjson(request):
+        return _streaming(work)
+    with _llm_errors():
+        return await run_in_threadpool(work)
+
 
 @tests.post("/execute", response_model=ReportResponse,
             summary="실행 결과 적절성 판단 (CLI: codetest test / run)")
-def execute_tests(payload: ExecuteRequest) -> ReportResponse:
-    """MCP 가 돌린 @SpringBootTest 결과를 보고 적절성을 판단한다."""
+async def execute_tests(payload: ExecuteRequest, request: Request):
+    """MCP 가 돌린 @SpringBootTest 결과를 보고 적절성을 판단한다.
+
+    generate 와 같은 규칙으로 `Accept: application/x-ndjson` 스트림을 지원한다.
+    """
     if not payload.execution:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "execution 이 비어 있습니다. MCP 의 실행 결과를 함께 보내야 합니다.",
         )
-    with _llm_errors():
+
+    def work() -> ReportResponse:
         return testgen.report(
             payload.execution,
             payload.test_code,
             payload.intent,
             payload.intent_rationale,
         )
+
+    if _wants_ndjson(request):
+        return _streaming(work)
+    with _llm_errors():
+        return await run_in_threadpool(work)
 
 
 router.include_router(tests)

@@ -43,8 +43,22 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-5", alias="CODETEST_LLM_MODEL")
     #: 추론 강도/토큰 지출 제어. minimal | low | medium | high
     #: (추론 모델이 아니면 llm.py 가 이 값을 빼고 재시도한다)
-    llm_effort: str = Field(default="high", alias="CODETEST_LLM_EFFORT")
+    #:
+    #: 기본값을 medium 으로 둔다. 추론 토큰은 눈에 보이지 않지만 응답 시간의
+    #: 대부분을 차지하고, high 는 그것을 몇 배로 불린다. 이 프롬프트는 MCP 가
+    #: AST 로 확정한 변경 단위·영향 그래프·기준 패키지·실제 구현 본문을 이미
+    #: 다 넘겨 준다 — 모델이 스스로 알아내야 할 것이 남아 있지 않으므로 high 의
+    #: 추가 숙고는 테스트 품질보다 대기 시간에 먼저 쓰인다.
+    #: 정확도를 더 원하면 CODETEST_LLM_EFFORT=high 로 되돌릴 수 있다.
+    llm_effort: str = Field(default="medium", alias="CODETEST_LLM_EFFORT")
     llm_max_tokens: int = Field(default=32000, alias="CODETEST_LLM_MAX_TOKENS")
+
+    #: 생성 응답을 기다리는 동안 keep-alive 를 흘려보내는 간격(초).
+    #: 앞단 리버스 프록시(nginx)의 proxy_read_timeout 은 "총 소요 시간" 이 아니라
+    #: **무응답 시간** 이다. 기본값 60초 동안 한 바이트도 안 오면 504 를 만든다.
+    #: LLM 이 생각하는 동안 주기적으로 한 줄씩 보내면 그 타이머가 계속 초기화되어
+    #: 프록시 설정을 건드리지 않고도 504 를 없앨 수 있다.
+    llm_ping_seconds: float = Field(default=10.0, alias="CODETEST_LLM_PING_SECONDS")
 
     @field_validator("api_keys", mode="before")
     @classmethod
