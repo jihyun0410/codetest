@@ -342,3 +342,42 @@ def test_small_context_is_sent_whole():
     section = testgen._target_code_section([("A.java", "class A {}"), ("B.java", "class B {}")])
     assert "class A {}" in section and "class B {}" in section
     assert "생략된 파일" not in section
+
+
+# --- 빌드 실패는 테스트 실패와 다르다 --------------------------------------------
+#
+# 컴파일이 깨지면 테스트가 시작조차 못해 집계가 전부 0 이 된다. 이 사실을 빼고
+# 보내면 "실패 0건이니 통과" 라는 엉뚱한 판정이 나온다.
+def test_build_errors_reach_the_prompt(client, monkeypatch):
+    seen: dict = {}
+    _stub_llm(monkeypatch, REPORT_OUTPUT, seen)
+
+    client.post("/api/v1/tests/execute", json={
+        **EXECUTE_BODY,
+        "execution": {
+            "exit_code": 1, "total": 0, "passed": 0, "failed": 0, "skipped": 0,
+            "failures": [], "springboot_applied": True, "jacoco_enabled": True,
+            "build_errors": ["FooTest.java:52: not a statement"],
+        },
+    })
+
+    prompt = seen["prompt"]
+    assert "테스트가 한 건도 실행되지 않았습니다" in prompt
+    assert "FooTest.java:52: not a statement" in prompt
+    assert "빌드 오류" in prompt
+
+
+def test_a_normal_run_says_nothing_about_the_build(client, monkeypatch):
+    seen: dict = {}
+    _stub_llm(monkeypatch, REPORT_OUTPUT, seen)
+    client.post("/api/v1/tests/execute", json=EXECUTE_BODY)
+
+    assert "빌드 오류" not in seen["prompt"]
+
+
+def test_the_judge_is_told_not_to_read_zero_failures_as_a_pass():
+    """프롬프트 규칙 자체를 고정한다 — 이 문장이 빠지면 오판이 되돌아온다."""
+    from app.testgen import _REPORT_SYSTEM
+
+    assert "빌드 오류가 보고되면 테스트는 한 건도 실행되지 않은 것입니다" in _REPORT_SYSTEM
+    assert "'부적절' 로 판단" in _REPORT_SYSTEM

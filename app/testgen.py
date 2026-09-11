@@ -93,6 +93,9 @@ _REPORT_SYSTEM = """당신은 Spring Boot 프로젝트를 담당하는 시니어
 - JaCoCo 커버리지가 있으면 변경 지점이 실제로 실행되었는지 판단에 함께 씁니다.
 - 실패했다면 원인을 실행 출력에서 인용해 설명합니다.
 - 컴파일 실패/컨텍스트 로딩 실패는 테스트 실패와 구분해 설명합니다.
+- **빌드 오류가 보고되면 테스트는 한 건도 실행되지 않은 것입니다.** 집계가
+  "실패 0건" 이라고 해서 통과한 것이 아니므로 반드시 '부적절' 로 판단하고,
+  어느 줄을 어떻게 고쳐야 하는지 오류 메시지를 인용해 알려 줍니다.
 
 아래 섹션 구조로만 출력합니다.
 
@@ -236,12 +239,24 @@ def _impact_section(analysis: dict) -> str:
 
 def _execution_section(execution: dict) -> str:
     lines = [
-        "# 실행 결과 (MCP 가 Gradle + JaCoCo 로 실행한 사실)",
+        "# 실행 결과 (개발자 PC 에서 Gradle + JaCoCo 로 실행한 사실)",
         f"- gradle exit code: {execution.get('exit_code')}",
         f"- @SpringBootTest 적용: {execution.get('springboot_applied')}",
         f"- 테스트 총 {execution.get('total', 0)}건 / 성공 {execution.get('passed', 0)} "
         f"/ 실패 {execution.get('failed', 0)} / 건너뜀 {execution.get('skipped', 0)}",
     ]
+
+    # 컴파일이 깨지면 테스트가 시작조차 못해 집계가 전부 0 이 된다.
+    # 이 사실을 빼고 보내면 "실패 0건이니 통과" 라는 엉뚱한 판정이 나온다.
+    build_errors = execution.get("build_errors") or []
+    if build_errors:
+        lines.append(
+            "- **테스트가 한 건도 실행되지 않았습니다 — 빌드가 실패했습니다.**"
+            " 아래는 테스트 실패가 아니라 빌드 오류입니다."
+        )
+        for error in build_errors[:20]:
+            lines.append(f"  · 빌드 오류: {error}")
+
     for failure in (execution.get("failures") or [])[:20]:
         lines.append(f"- 실패: {failure}")
 
