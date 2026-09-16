@@ -30,6 +30,20 @@ class LLMRefusalError(RuntimeError):
         self.explanation = explanation
 
 
+def _root_cause_name(exc: BaseException) -> str:
+    """예외 사슬 맨 끝의 클래스 이름.
+
+    openai SDK 는 전송 계층 예외를 APIConnectionError("Connection error.") 로
+    감싸 버려서, 메시지만 봐서는 "닿지 못했다" 와 "받다가 끊겼다" 를 구분할 수
+    없다. 진짜 원인은 __cause__ 사슬 끝에 있다. (httpx 를 import 하지 않고
+    이름으로만 보는 이유는 이 모듈이 SDK 의 전송 구현에 묶이지 않게 하려는 것.)
+    """
+    cause = exc
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    return type(cause).__name__
+
+
 @dataclass
 class LLMResponse:
     text: str
@@ -141,7 +155,22 @@ class LLMClient:
             raise LLMUnavailableError(f"OpenAI 가 요청을 거부했습니다 (400): {exc}") from None
 
         except openai.APIConnectionError as exc:
-            # 요청이 서버에 닿지도 못한 경우. 키/모델이 틀렸다면 401/404 로 온다.
+            # 아예 닿지 못한 경우와 응답 도중 끊긴 경우는 조치가 전혀 다르다.
+            # SDK 는 둘 다 APIConnectionError("Connection error.") 로 덮어쓰므로
+            # 원인 사슬을 직접 들춰 구분한다.
+            if _root_cause_name(exc) == "RemoteProtocolError":
+                raise LLMUnavailableError(
+                    f"LLM 이 응답을 끝맺지 않고 연결을 끊었습니다 "
+                    f"(peer closed connection without sending complete message body).\n"
+                    f"  · 요청 주소: {client.base_url}\n"
+                    f"  · 이 호출은 비스트리밍이라 생성이 끝날 때까지 한 바이트도 오지\n"
+                    f"    않습니다. 그 시간이 게이트웨이/프록시의 무응답 타임아웃보다\n"
+                    f"    길어지면 응답이 오기 전에 상대가 먼저 끊습니다.\n"
+                    f"  · 게이트웨이의 read timeout 을 늘리거나, "
+                    f"CODETEST_LLM_MAX_TOKENS({settings.llm_max_tokens})\n"
+                    f"    ·CODETEST_LLM_EFFORT({settings.llm_effort}) 를 낮춰 생성 시간을 줄이세요.\n"
+                    f"  ({exc.__cause__ or exc})"
+                ) from None
             raise LLMUnavailableError(
                 f"OpenAI 에 연결하지 못했습니다: {exc}\n"
                 f"  · 요청 주소: {client.base_url}\n"

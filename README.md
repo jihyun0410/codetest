@@ -124,6 +124,32 @@ MCP 가 AST 로 확정한 변경 단위·영향 그래프·기준 패키지·실
 근거 문장이 길어져 봐야 대기 시간만 늘지만, 테스트 코드를 줄이면 import·필드가
 빠져 컴파일이 깨진다.
 
+## RemoteProtocolError — 504 의 반대쪽 실패
+
+    RemoteProtocolError: peer closed connection without sending complete
+    message body (incomplete chunked read)
+
+504 가 "아무 말도 안 해서 끊긴" 것이라면, 이쪽은 **말하다 만 것**이다. 청크 본문을
+끝맺는 마지막 청크 없이 연결이 닫히면 받는 쪽 httpx 가 이 예외를 던진다. 그 메시지에는
+무엇이 잘못됐는지가 하나도 담기지 않으므로, 애초에 그런 스트림을 만들지 않는 것이 낫다.
+
+**스트림은 반드시 한 줄로 끝맺는다.** `_ndjson` 은 어떤 실패가 나든 `result` 또는
+`error` 줄을 내보낸 뒤에야 끝난다 (`app/main.py`). 예상 못 한 예외는 물론 결과를
+JSON 으로 못 바꾸는 경우까지 `{"type":"error","status":500,...}` 한 줄이 된다.
+첫 ping 도 대기 없이 바로 보낸다 — uvicorn 은 본문 첫 조각이 나와야 헤더를 내보내므로,
+그게 없으면 첫 ping 간격 동안 앞단에 아무것도 도착하지 않는다.
+
+그래도 이 오류가 뜬다면 남는 원인은 **스트림을 만드는 프로세스가 사라진 것**이다 —
+uvicorn 재시작·OOM·앞단 프록시의 강제 종료. Agent 로그부터 본다.
+
+**LLM 게이트웨이 구간에서도 같은 일이 난다.** `llm.py` 의 호출은 비스트리밍이라
+생성이 끝날 때까지 게이트웨이에서 한 바이트도 오지 않는다. 그 시간이 게이트웨이의
+무응답 타임아웃보다 길면 게이트웨이가 먼저 끊는다. openai SDK 는 이것을
+`APIConnectionError("Connection error.")` 로 덮어써 "닿지 못했다" 와 구분이 안 되므로,
+`_root_cause_name` 으로 원인 사슬 끝을 확인해 따로 안내한다. 이 경우의 조치는
+게이트웨이 read timeout 을 늘리거나 `CODETEST_LLM_MAX_TOKENS`·`CODETEST_LLM_EFFORT`
+를 낮춰 생성 시간을 줄이는 것이고, 근본적으로는 이 호출을 `stream=True` 로 바꾸는 것이다.
+
 ## 테스트
 
 ```bash

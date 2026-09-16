@@ -11,6 +11,7 @@ Agent 는 **LLM 판단만** 한다. 진입점은 MCP 이고, 코드 기반 사�
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -259,6 +260,28 @@ def test_code_fence_is_stripped():
     assert testgen._extract_code("class B {}") == "class B {}"
 
 
+def test_root_cause_name_sees_through_the_sdk_wrapper():
+    """openai SDK 는 전송 오류를 APIConnectionError("Connection error.") 로 덮어쓴다.
+
+    "닿지 못했다" 와 "받다가 끊겼다" 는 조치가 다르므로 사슬 끝을 봐야 구분된다.
+    """
+    from app.llm import _root_cause_name
+
+    cut = httpx.RemoteProtocolError(
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"
+    )
+    try:
+        try:
+            raise cut
+        except httpx.RemoteProtocolError as inner:
+            raise RuntimeError("Connection error.") from inner
+    except RuntimeError as wrapped:
+        assert _root_cause_name(wrapped) == "RemoteProtocolError"
+
+    assert _root_cause_name(RuntimeError("Connection error.")) == "RuntimeError"
+
+
 # --- 앞단 프록시 대비 keep-alive 스트림 ----------------------------------------
 #
 # nginx 의 proxy_read_timeout 은 총 소요 시간이 아니라 **무응답 시간**이다.
@@ -313,6 +336,32 @@ def test_execute_streams_too(client, monkeypatch):
     last = _ndjson_lines(res)[-1]
     assert last["type"] == "result"
     assert last["data"]["verdict"] == "적절"
+
+
+# 스트림이 끝 줄 없이 잘리면 호출자는
+#   RemoteProtocolError: peer closed connection without sending complete
+#   message body (incomplete chunked read)
+# 만 받는다 — 무엇이 잘못됐는지가 하나도 안 담긴다. 어떤 실패든 한 줄로 끝맺어야 한다.
+def test_an_unexpected_failure_still_closes_the_stream(client, monkeypatch):
+    def _boom(system, user):
+        raise ZeroDivisionError("예상 못 한 실패")
+
+    monkeypatch.setattr(llm_client, "complete", _boom)
+    res = client.post("/api/v1/tests/generate", json=GENERATE_BODY, headers=NDJSON)
+
+    last = _ndjson_lines(res)[-1]
+    assert last["type"] == "error" and last["status"] == 500
+    assert res.text.endswith("\n"), "끝 줄이 온전해야 잘린 스트림으로 보이지 않는다"
+
+
+def test_the_stream_sends_a_line_before_the_work_starts(client, monkeypatch):
+    """uvicorn 은 본문 첫 조각이 나와야 헤더를 내보낸다 — 첫 줄이 바로 나가야 한다."""
+    _stub_llm(monkeypatch, GENERATE_OUTPUT)
+    res = client.post("/api/v1/tests/generate", json=GENERATE_BODY, headers=NDJSON)
+
+    lines = _ndjson_lines(res)
+    assert lines[0] == {"type": "ping"}
+    assert lines[-1]["type"] == "result"
 
 
 def test_plain_json_still_works_for_older_callers(client, monkeypatch):
