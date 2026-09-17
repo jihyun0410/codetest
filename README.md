@@ -53,7 +53,7 @@ CLI  test_run 호출
    MCP  기능 중요도 High/Mid/Low + 판단 근거 확정        (코드 기반)
    └ Agent  POST /api/v1/tests/generate
               THINKING → INTENT → TEST_CASES → TEST_CODE (LLM)
-   MCP  @SpringBootTest 주입 + gradle test + jacocoTestReport
+   MCP  @SpringBootTest 주입 + 빌드 실행(Gradle/Maven) + 커버리지 리포트
    └ Agent  POST /api/v1/tests/execute
               VERDICT(적절/부적절) + 근거                (LLM)
 CLI  결과 화면 (중요도·근거 / TEST CODE 보기 / TEST RESULT)

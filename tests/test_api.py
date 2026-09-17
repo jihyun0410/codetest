@@ -373,6 +373,34 @@ def test_plain_json_still_works_for_older_callers(client, monkeypatch):
     assert "@SpringBootTest" in res.json()["test_code"]
 
 
+# --- 프로젝트 구조는 실행한 쪽이 알려 준다 ----------------------------------------
+#
+# 빌드 도구와 모듈은 프로젝트마다 다르다. Agent 는 그것을 짐작하지 않고 실행 결과에
+# 실려 온 사실을 그대로 프롬프트에 적는다 — 판정 근거에 인용되기 때문이다.
+def test_the_prompt_names_the_build_tool_that_actually_ran(client, monkeypatch):
+    seen: dict = {}
+    _stub_llm(monkeypatch, REPORT_OUTPUT, seen)
+    body = {
+        **EXECUTE_BODY,
+        "execution": {**EXECUTE_BODY["execution"], "build_tool": "maven", "module": "api"},
+    }
+
+    client.post("/api/v1/tests/execute", json=body)
+
+    prompt = seen["prompt"]
+    assert "Maven 모듈 api" in prompt
+    assert "maven exit code" in prompt
+
+
+def test_an_older_client_without_build_info_still_reads_as_gradle(client, monkeypatch):
+    seen: dict = {}
+    _stub_llm(monkeypatch, REPORT_OUTPUT, seen)
+    client.post("/api/v1/tests/execute", json=EXECUTE_BODY)
+
+    assert "Gradle" in seen["prompt"]
+    assert "gradle exit code" in seen["prompt"]
+
+
 # --- 프롬프트 예산 -------------------------------------------------------------
 def test_oversized_context_drops_whole_files_instead_of_cutting_one():
     """잘린 파일을 보내면 모델이 없는 API 를 지어낸다 — 통째로 빼고 알린다."""

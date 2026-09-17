@@ -238,12 +238,19 @@ def _impact_section(analysis: dict) -> str:
 
 
 def _execution_section(execution: dict) -> str:
+    # 빌드 도구와 모듈은 프로젝트마다 다르다 (Gradle/Maven, 단일/멀티 모듈).
+    # 실행한 쪽이 알려 준 사실을 그대로 적는다 — 판정 근거에 그대로 인용된다.
+    tool = "Maven" if execution.get("build_tool") == "maven" else "Gradle"
+    module = execution.get("module") or ""
+    where = f"{tool} 모듈 {module}" if module else tool
     lines = [
-        "# 실행 결과 (개발자 PC 에서 Gradle + JaCoCo 로 실행한 사실)",
-        f"- gradle exit code: {execution.get('exit_code')}",
+        f"# 실행 결과 (개발자 PC 에서 {where} + JaCoCo 로 실행한 사실)",
+        f"- {tool.lower()} exit code: {execution.get('exit_code')}",
         f"- @SpringBootTest 적용: {execution.get('springboot_applied')}",
-        f"- 테스트 총 {execution.get('total', 0)}건 / 성공 {execution.get('passed', 0)} "
-        f"/ 실패 {execution.get('failed', 0)} / 건너뜀 {execution.get('skipped', 0)}",
+        (
+            f"- 테스트 총 {execution.get('total', 0)}건 / 성공 {execution.get('passed', 0)} "
+            f"/ 실패 {execution.get('failed', 0)} / 건너뜀 {execution.get('skipped', 0)}"
+        ),
     ]
 
     # 컴파일이 깨지면 테스트가 시작조차 못해 집계가 전부 0 이 된다.
