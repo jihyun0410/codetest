@@ -95,25 +95,43 @@ def _error_line(exc: Exception) -> dict:
     return {"type": "error", "status": 500, "detail": f"서버 내부 오류가 발생했습니다: {exc}"}
 
 
+def _line(payload: dict) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 async def _ndjson(work: Callable[[], object]) -> AsyncIterator[bytes]:
     """LLM 이 답할 때까지 ping 을 흘리고, 끝나면 결과 한 줄을 보낸다.
 
     nginx 의 proxy_read_timeout 은 총 소요 시간이 아니라 **무응답 시간**이다.
     한 줄이라도 도착하면 타이머가 처음부터 다시 시작하므로, 생성이 몇 분 걸려도
     프록시 설정을 건드리지 않고 504 를 피할 수 있다.
+
+    **끝 줄 없이 끝나면 안 된다.** 스트림이 시작된 뒤 본문이 잘리면 호출자는
+    `RemoteProtocolError: peer closed connection without sending complete
+    message body (incomplete chunked read)` 를 보게 되고, 거기엔 무엇이 잘못
+    됐는지가 하나도 담기지 않는다. 어떤 실패든 result/error 한 줄로 끝맺는다.
     """
     task = asyncio.create_task(run_in_threadpool(work))
-    while True:
-        done, _ = await asyncio.wait({task}, timeout=settings.llm_ping_seconds)
-        if done:
-            break
+    try:
+        # 첫 줄을 바로 보낸다 — uvicorn 은 본문 첫 조각이 나와야 헤더를 내보내므로,
+        # 이게 없으면 첫 ping 까지 앞단에 아무것도 도착하지 않는다.
         yield b'{"type":"ping"}\n'
 
-    try:
-        payload = {"type": "result", "data": jsonable_encoder(task.result())}
-    except Exception as exc:  # noqa: BLE001 — 어떤 실패든 스트림 안에서 알려야 한다
-        payload = _error_line(exc)
-    yield (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=settings.llm_ping_seconds)
+            if done:
+                break
+            yield b'{"type":"ping"}\n'
+
+        try:
+            line = _line({"type": "result", "data": jsonable_encoder(task.result())})
+        except Exception as exc:  # noqa: BLE001 — 어떤 실패든 스트림 안에서 알려야 한다
+            line = _line(_error_line(exc))
+        yield line
+    finally:
+        # 끝 줄까지 못 가고 닫히는 경우(호출자가 끊음·서버 종료)에도 기다리던
+        # 작업을 놓아 준다. 이미 끝난 task 면 아무 일도 일어나지 않는다.
+        task.cancel()
 
 
 def _streaming(work: Callable[[], object]) -> StreamingResponse:
