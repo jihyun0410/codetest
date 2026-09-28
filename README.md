@@ -86,8 +86,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `OPENAI_API_KEY` | (없음) | LLM API 키 |
 | `OPENAI_BASE_URL` | (없음) | OpenAI 호환 엔드포인트. 비우면 공식 주소 |
 | `CODETEST_LLM_MODEL` | `gpt-5` | 사용할 모델 |
-| `CODETEST_LLM_EFFORT` | `medium` | 추론 강도 (minimal/low/medium/high). 아래 "생성 시간" 참고 |
-| `CODETEST_LLM_MAX_TOKENS` | `32000` | 출력 토큰 상한 |
+| `CODETEST_LLM_MAX_TOKENS` | `32000` | 출력 토큰 상한. 아래 "생성 시간" 참고 |
 | `CODETEST_LLM_PING_SECONDS` | `10` | 생성 중 keep-alive 간격(초) |
 
 ## 생성 시간 — 504 Gateway Time-out 을 만드는 것
@@ -114,11 +113,12 @@ ping 을 버리고 마지막 줄만 쓴다. Accept 를 안 보내면 예전처�
 침묵이 ping 간격에 고정되므로 **생성이 몇 분이 걸리든 504 가 나지 않는다.**
 nginx 설정을 건드릴 수 없는 환경을 위한 장치다.
 
-**2. 실제 생성 시간 자체를 줄인다.** 눈에 보이지 않는 추론 토큰이 응답 시간의
-대부분을 차지한다. 기본 추론 강도를 `high` → `medium` 으로 낮췄다. 이 프롬프트는
-MCP 가 AST 로 확정한 변경 단위·영향 그래프·기준 패키지·실제 구현 본문을 이미 다
-넘겨 주므로 모델이 스스로 알아내야 할 것이 남아 있지 않다 — high 의 추가 숙고는
-테스트 품질보다 대기 시간에 먼저 쓰인다. 되돌리려면 `CODETEST_LLM_EFFORT=high`.
+**2. 실제 생성 시간 자체를 줄인다.** 출력 토큰 상한
+(`CODETEST_LLM_MAX_TOKENS`)이 생성 시간을 가장 크게 좌우한다.
+
+`reasoning_effort` 는 **보내지 않는다.** 추론 모델 전용 파라미터라 그렇지 않은
+모델·게이트웨이에서는 400 을 받고, 그때 값을 빼고 다시 부르느라 호출이 두 번
+나갔다. 지금은 모델이 자기 기본값으로 판단한다.
 
 설명 섹션(THINKING/근거)에는 줄 수 상한을 뒀고 **TEST_CODE 에는 두지 않았다.**
 근거 문장이 길어져 봐야 대기 시간만 늘지만, 테스트 코드를 줄이면 import·필드가
@@ -147,8 +147,8 @@ uvicorn 재시작·OOM·앞단 프록시의 강제 종료. Agent 로그부터 �
 무응답 타임아웃보다 길면 게이트웨이가 먼저 끊는다. openai SDK 는 이것을
 `APIConnectionError("Connection error.")` 로 덮어써 "닿지 못했다" 와 구분이 안 되므로,
 `_root_cause_name` 으로 원인 사슬 끝을 확인해 따로 안내한다. 이 경우의 조치는
-게이트웨이 read timeout 을 늘리거나 `CODETEST_LLM_MAX_TOKENS`·`CODETEST_LLM_EFFORT`
-를 낮춰 생성 시간을 줄이는 것이고, 근본적으로는 이 호출을 `stream=True` 로 바꾸는 것이다.
+게이트웨이 read timeout 을 늘리거나 `CODETEST_LLM_MAX_TOKENS` 를 낮춰 생성 시간을
+줄이는 것이고, 근본적으로는 이 호출을 `stream=True` 로 바꾸는 것이다.
 
 ## 테스트
 

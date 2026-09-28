@@ -41,16 +41,7 @@ class Settings(BaseSettings):
     #: 비우면 SDK 기본값(https://api.openai.com/v1).
     openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
     llm_model: str = Field(default="gpt-5", alias="CODETEST_LLM_MODEL")
-    #: 추론 강도/토큰 지출 제어. minimal | low | medium | high
-    #: (추론 모델이 아니면 llm.py 가 이 값을 빼고 재시도한다)
-    #:
-    #: 기본값을 medium 으로 둔다. 추론 토큰은 눈에 보이지 않지만 응답 시간의
-    #: 대부분을 차지하고, high 는 그것을 몇 배로 불린다. 이 프롬프트는 MCP 가
-    #: AST 로 확정한 변경 단위·영향 그래프·기준 패키지·실제 구현 본문을 이미
-    #: 다 넘겨 준다 — 모델이 스스로 알아내야 할 것이 남아 있지 않으므로 high 의
-    #: 추가 숙고는 테스트 품질보다 대기 시간에 먼저 쓰인다.
-    #: 정확도를 더 원하면 CODETEST_LLM_EFFORT=high 로 되돌릴 수 있다.
-    llm_effort: str = Field(default="medium", alias="CODETEST_LLM_EFFORT")
+    #: 출력 토큰 상한. 생성 시간은 이 값에 가장 크게 좌우된다.
     llm_max_tokens: int = Field(default=32000, alias="CODETEST_LLM_MAX_TOKENS")
 
     #: 생성 응답을 기다리는 동안 keep-alive 를 흘려보내는 간격(초).

@@ -373,6 +373,62 @@ def test_plain_json_still_works_for_older_callers(client, monkeypatch):
     assert "@SpringBootTest" in res.json()["test_code"]
 
 
+# --- LLM 에 무엇을 보내는가 -------------------------------------------------------
+#
+# reasoning_effort 는 추론 모델 전용 파라미터다. 그렇지 않은 모델·게이트웨이는 400 을
+# 돌려주고, 그때 값을 빼고 다시 부르느라 호출이 두 번 나갔다. 이제 보내지 않는다.
+class _Recorder:
+    """openai 클라이언트 대역 — create() 에 실린 인자를 그대로 모아 둔다."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.base_url = "https://example.invalid/v1"
+        self.chat = type("_Chat", (), {"completions": self})()
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        message = type("_Msg", (), {"content": GENERATE_OUTPUT, "refusal": None})()
+        choice = type("_Choice", (), {"message": message, "finish_reason": "stop"})()
+        usage = type("_Usage", (), {"prompt_tokens": 1, "completion_tokens": 2})()
+        return type("_Completion", (), {"choices": [choice], "usage": usage, "model": "stub"})()
+
+
+def _recorded(monkeypatch) -> _Recorder:
+    recorder = _Recorder()
+    monkeypatch.setattr(llm_client, "_ensure_client", lambda: recorder)
+    return recorder
+
+
+def test_reasoning_effort_is_not_sent(monkeypatch):
+    recorder = _recorded(monkeypatch)
+
+    llm_client.complete("system", "user")
+
+    assert recorder.calls, "create 가 호출되지 않았다"
+    assert "reasoning_effort" not in recorder.calls[0]
+
+
+def test_only_one_call_goes_out(monkeypatch):
+    """예전에는 400 을 받고 reasoning_effort 를 뺀 뒤 다시 불러 두 번 나갔다."""
+    recorder = _recorded(monkeypatch)
+
+    llm_client.complete("system", "user")
+
+    assert len(recorder.calls) == 1
+
+
+def test_the_call_still_carries_model_and_token_cap(monkeypatch):
+    """지우는 과정에서 같이 빠지면 안 되는 것들."""
+    recorder = _recorded(monkeypatch)
+
+    llm_client.complete("system", "user")
+
+    sent = recorder.calls[0]
+    assert sent["model"] == settings.llm_model
+    assert sent["max_completion_tokens"] == settings.llm_max_tokens
+    assert [m["role"] for m in sent["messages"]] == ["system", "user"]
+
+
 # --- 프로젝트 구조는 실행한 쪽이 알려 준다 ----------------------------------------
 #
 # 빌드 도구와 모듈은 프로젝트마다 다르다. Agent 는 그것을 짐작하지 않고 실행 결과에
