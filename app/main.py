@@ -125,7 +125,7 @@ async def _ndjson(work: Callable[[], object]) -> AsyncIterator[bytes]:
 
         try:
             line = _line({"type": "result", "data": jsonable_encoder(task.result())})
-        except Exception as exc:  # noqa: BLE001 — 어떤 실패든 스트림 안에서 알려야 한다
+        except Exception as exc:      # 어떤 실패든 스트림 안에서 알려야 한다
             line = _line(_error_line(exc))
         yield line
     finally:

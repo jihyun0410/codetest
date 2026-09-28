@@ -221,13 +221,12 @@ def _impact_section(analysis: dict) -> str:
         "# 영향 범위 (그래프 추적)",
         f"- 등급: {analysis.get('risk', 'LOW')} (점수 {analysis.get('risk_score', 0)})",
     ]
-    for reason in analysis.get("risk_reasons") or []:
-        lines.append(f"- 근거: {reason}")
-    for unit in impacted[:30]:
-        lines.append(
-            f"- {unit.get('depth')}-Depth {unit.get('qualified_name')} "
-            f"({unit.get('file_path')}, via {unit.get('via')})"
-        )
+    lines.extend(f"- 근거: {reason}" for reason in analysis.get("risk_reasons") or [])
+    lines.extend(
+        f"- {unit.get('depth')}-Depth {unit.get('qualified_name')} "
+        f"({unit.get('file_path')}, via {unit.get('via')})"
+        for unit in impacted[:30]
+    )
     files = analysis.get("affected_files") or []
     if len(files) > 1:
         lines.append(
@@ -261,11 +260,9 @@ def _execution_section(execution: dict) -> str:
             "- **테스트가 한 건도 실행되지 않았습니다 — 빌드가 실패했습니다.**"
             " 아래는 테스트 실패가 아니라 빌드 오류입니다."
         )
-        for error in build_errors[:20]:
-            lines.append(f"  · 빌드 오류: {error}")
+        lines.extend(f"  · 빌드 오류: {error}" for error in build_errors[:20])
 
-    for failure in (execution.get("failures") or [])[:20]:
-        lines.append(f"- 실패: {failure}")
+    lines.extend(f"- 실패: {failure}" for failure in (execution.get("failures") or [])[:20])
 
     coverage = execution.get("coverage")
     if coverage:
