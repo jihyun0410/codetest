@@ -110,7 +110,6 @@ class LLMClient:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "reasoning_effort": settings.llm_effort,
         })
 
         choice = completion.choices[0]
@@ -144,14 +143,6 @@ class LLMClient:
             return client.chat.completions.create(**kwargs)
 
         except openai.BadRequestError as exc:
-            # reasoning_effort 는 추론 모델 전용 — 그것 때문에 거부당했을 때만 빼고 재시도한다.
-            if "reasoning_effort" in kwargs and "reasoning_effort" in str(exc):
-                logger.info(
-                    "%s 가 reasoning_effort 를 받지 않음 — 제거 후 재시도", settings.llm_model
-                )
-                return self._create(
-                    client, {k: v for k, v in kwargs.items() if k != "reasoning_effort"}
-                )
             raise LLMUnavailableError(f"OpenAI 가 요청을 거부했습니다 (400): {exc}") from None
 
         except openai.APIConnectionError as exc:
