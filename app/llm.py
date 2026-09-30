@@ -127,15 +127,13 @@ class LLMClient:
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
             cache_read_tokens=getattr(details, "cached_tokens", 0) or 0,
             stop_reason=choice.finish_reason,
-            meta={"effort": settings.llm_effort},
         )
 
     def _create(self, client, kwargs: dict):
         """호출 1건. 실패하면 **무엇을 고쳐야 하는지** 구분해서 알린다.
 
-        연결 오류와 키/모델 오류는 원인도 조치도 전혀 다르다. 예전에는 어떤 예외든
-        reasoning_effort 탓으로 보고 재시도해, 연결이 막힌 경우에도 두 번 호출한 뒤
-        "OpenAI 호출에 실패했습니다: Connection error" 만 남겼다.
+        연결 오류와 키/모델 오류는 원인도 조치도 전혀 다르다. 어떤 예외든 뭉뚱그리면
+        연결이 막힌 경우에도 "OpenAI 호출에 실패했습니다: Connection error" 만 남는다.
         """
         import openai
 
@@ -158,8 +156,8 @@ class LLMClient:
                     f"    않습니다. 그 시간이 게이트웨이/프록시의 무응답 타임아웃보다\n"
                     f"    길어지면 응답이 오기 전에 상대가 먼저 끊습니다.\n"
                     f"  · 게이트웨이의 read timeout 을 늘리거나, "
-                    f"CODETEST_LLM_MAX_TOKENS({settings.llm_max_tokens})\n"
-                    f"    ·CODETEST_LLM_EFFORT({settings.llm_effort}) 를 낮춰 생성 시간을 줄이세요.\n"
+                    f"CODETEST_LLM_MAX_TOKENS({settings.llm_max_tokens}) 를 낮춰\n"
+                    f"    생성 시간을 줄이세요.\n"
                     f"  ({exc.__cause__ or exc})"
                 ) from None
             raise LLMUnavailableError(
