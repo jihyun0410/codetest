@@ -151,8 +151,9 @@ router = APIRouter(prefix="/api/v1")
 
 
 @router.get("/health", tags=["health"], summary="헬스체크")
-def health() -> dict:
+async def health() -> dict:
     """연결 확인용 (인증 불필요). MCP 의 `hello` 도구가 이 값을 함께 알린다."""
+    # async 여야 한다 — sync def 는 LLM 호출과 같은 스레드풀을 기다려, LLM 이 멈추면 probe 가 죽는다.
     return {
         "status": "ok",
         "app": settings.app_name,
